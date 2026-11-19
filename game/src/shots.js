@@ -1,79 +1,62 @@
-// The screenshot scenes behind ?shot=start|play|end. Each one plays the real rules forward from a
-// fresh world for a fixed number of steps, steered by a simple autopilot (look ahead each way the
-// paddle could move, keep clear of blocks, chase the lowest coin when that is safe), so the frame
-// is what a short game really looks like and the same seed always gives the same frame.
-import { FIELD, PLAYER, STEP } from './config.js';
-import { EVENT_OVER, KIND_BLOCK } from './world.js';
-import { SCREEN_OVER, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
-
-const START_SECONDS = 5;
-const PLAY_SECONDS = 26;
-const END_LIMIT_SECONDS = 600;
-/**
- * How far ahead, in seconds, the autopilot checks each way it could move: the play scene's pilot
- * looks well ahead and keeps all its lives; the end scene's looks only a moment ahead, so it is
- * caught out once the blocks speed up, as a hurried player is.
- */
-const HORIZON_PLAY = 0.7;
-const HORIZON_END = 0.25;
-const SAMPLE = 1 / 30;
-const DIRECTIONS = [0, -1, 1];
-/** Extra room, each side, it keeps between the paddle and a block. */
-const MARGIN = 10;
-
-/** Seconds until moving in `direction` (-1, 0, 1) runs the paddle into a block; Infinity when it never does. */
-function timeToHit(state, direction, horizon) {
-  const player = state.player;
-  for (let t = SAMPLE; t <= horizon; t += SAMPLE) {
-    const x = Math.min(FIELD.width - player.width, Math.max(0, player.x + direction * PLAYER.speed * t));
-    for (let index = 0; index < state.items.length; index += 1) {
-      const item = state.items[index];
-      if (!item.active || item.kind !== KIND_BLOCK) continue;
-      const y = item.y + item.speed * t;
-      if (y + item.height > player.y && y < player.y + player.height && item.x < x + player.width + MARGIN && item.x + item.width > x - MARGIN) return t;
+export function setupShot(game, kind) {
+    game.shotMode = true;
+    game.shotFrames = 0;
+    if (kind === 'start') {
+        // Title screen over the living city: nothing to set up.
+        return;
     }
-  }
-  return Infinity;
-}
-
-/** Of the safe ways to move, the one toward the lowest coin (or the centre); else the one that is hit last. */
-function autopilot(state, horizon) {
-  const player = state.player;
-  let coin = null;
-  for (let index = 0; index < state.items.length; index += 1) {
-    const item = state.items[index];
-    if (item.active && item.kind !== KIND_BLOCK && (coin === null || item.y > coin.y)) coin = item;
-  }
-  const target = coin === null ? FIELD.width / 2 : coin.x + coin.width / 2;
-  const centre = player.x + player.width / 2;
-  const wanted = target > centre + 8 ? 1 : target < centre - 8 ? -1 : 0;
-  let best = wanted;
-  let bestTime = timeToHit(state, wanted, horizon);
-  for (let index = 0; index < DIRECTIONS.length && bestTime !== Infinity; index += 1) {
-    const time = timeToHit(state, DIRECTIONS[index], horizon);
-    if (time > bestTime) {
-      bestTime = time;
-      best = DIRECTIONS[index];
+    // Gameplay shots bypass newGame(), which is what normally unhides the
+    // live HUD (boot leaves #hud-live display:none), so unhide it here.
+    game.hud.setHudVisible(true);
+    if (kind === 'play') {
+        game.debugDrive = true;
+        game.state = 'playing';
+        game.hud.hideMenus();
+        game.player.teleport(0, 120);
+        game.player.heading = Math.PI;
+        const v = game.spawnShotVehicle('solmarGT', 0, 120, Math.PI);
+        game.shotEnterVehicle(v);
+        game.player.cash = 1750;
+        game.police.heat = 40;
+        game.rig.yaw = Math.PI;
+        game.rig.pitch = 0.3;
+        game.rig.snapTo(game.player.pos);
+        return;
     }
-  }
-  return best;
-}
-
-/**
- * Set `world` to the named scene (start, play or end; any other name is start) and return the
- * screen to draw over it and the best score to show.
- */
-export function stageShot(name, world) {
-  world.reset();
-  if (name !== 'play' && name !== 'end') {
-    for (let index = 0; index < START_SECONDS / STEP; index += 1) world.step(STEP, 0, true);
-    return { screen: SCREEN_TITLE, best: 0 };
-  }
-  const limit = name === 'end' ? END_LIMIT_SECONDS : PLAY_SECONDS;
-  const horizon = name === 'end' ? HORIZON_END : HORIZON_PLAY;
-  for (let index = 0; index < limit / STEP; index += 1) {
-    if (world.step(STEP, autopilot(world.state, horizon), false) & EVENT_OVER) break;
-  }
-  const over = world.state.lives === 0;
-  return { screen: over ? SCREEN_OVER : SCREEN_PLAY, best: world.state.score };
+    if (kind === 'combat') {
+        game.state = 'playing';
+        game.hud.hideMenus();
+        game.player.teleport(618, -158);
+        game.player.heading = 2.46;
+        game.combat.unlock('kestrel');
+        game.combat.select('kestrel');
+        game.player.setWeapon('kestrel');
+        game.missions.startMission(0);
+        game.skipCutscene();
+        game.missions.debugJumpToStep(1);
+        game.debugAim = true;
+        game.rig.yaw = 2.46;
+        game.rig.pitch = 0.22;
+        game.rig.snapTo(game.player.pos);
+        game.player.cash = 250;
+        return;
+    }
+    if (kind === 'end') {
+        game.state = 'playing';
+        game.hud.hideMenus();
+        game.missions.storyComplete = true;
+        game.missions.discount = true;
+        game.missions.current = 3;
+        game.player.cash = 52000;
+        game.player.health = 100;
+        game.player.armor = 100;
+        game.player.teleport(766, 246);
+        game.player.heading = 2.2;
+        game.spawnShotVehicle('solmarGT', 752, 252, 2.2);
+        game.city.setTimeOfDay('sunset');
+        game.rig.yaw = 2.2;
+        game.rig.pitch = 0.28;
+        game.rig.snapTo(game.player.pos);
+        return;
+    }
 }

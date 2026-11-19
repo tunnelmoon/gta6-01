@@ -1,141 +1,200 @@
-// Drawing only: the world's state and the current screen in, pixels out. The 1280x720 playfield
-// is scaled to fit the window and centred, the margin filled with the backdrop colour. Flat
-// rectangles and circles, canvas text for the HUD and the panels. Text that holds a number is
-// rebuilt only when the number changes, so a frame allocates nothing.
-import { FIELD, FONT, LIVES, PALETTE } from './config.js';
-import { KIND_COIN } from './world.js';
-
-export const SCREEN_TITLE = 'title';
-export const SCREEN_PLAY = 'play';
-export const SCREEN_PAUSED = 'paused';
-export const SCREEN_OVER = 'over';
-
-/** The panel's width; its height grows with its lines: room for the title, the lines and the prompt. */
-const PANEL = { width: 600, top: 134, line: 34, bottom: 70 };
-const LIFE_SIZE = 20;
-const LIFE_GAP = 8;
-
-function cachedLabel(prefix) {
-  let value = -1;
-  let text = '';
-  return function label(next) {
-    if (next !== value) {
-      value = next;
-      text = prefix + next;
+// Renderer and camera: WebGL setup, a spring-damped third-person orbit
+// camera with collision pull-in, trauma-based screen shake (summed sines,
+// never random per frame), FOV speed effect, and a pooled particle system.
+import * as THREE from 'three';
+import { clamp, lerp } from './config.js';
+import { Rng } from './rng.js';
+export class Renderer {
+    constructor(canvas, lowFx = false) {
+        this.renderer = new THREE.WebGLRenderer({ canvas, antialias: !lowFx, powerPreference: 'high-performance' });
+        this.renderer.setPixelRatio(lowFx ? 1 : Math.min(window.devicePixelRatio, 2));
+        this.renderer.shadowMap.enabled = !lowFx;
+        this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        this.renderer.toneMappingExposure = 1.05;
+        this.scene = new THREE.Scene();
+        this.camera = new THREE.PerspectiveCamera(68, 1, 0.1, 6000);
+        this.resize();
+        window.addEventListener('resize', () => this.resize());
     }
-    return text;
-  };
+    resize() {
+        const w = window.innerWidth;
+        const h = window.innerHeight;
+        this.renderer.setSize(w, h, false);
+        this.camera.aspect = w / h;
+        this.camera.updateProjectionMatrix();
+    }
+    render() {
+        this.renderer.render(this.scene, this.camera);
+    }
 }
-
-export function createRenderer(canvas) {
-  const context = canvas.getContext('2d');
-  const view = { scale: 1, x: 0, y: 0 };
-  const scoreLabel = cachedLabel('Score ');
-  const levelLabel = cachedLabel('Level ');
-  const finalLabel = cachedLabel('Score ');
-  const bestLabel = cachedLabel('Best ');
-
-  function resize() {
-    const ratio = window.devicePixelRatio || 1;
-    const width = Math.round(window.innerWidth * ratio);
-    const height = Math.round(window.innerHeight * ratio);
-    canvas.width = width;
-    canvas.height = height;
-    view.scale = Math.min(width / FIELD.width, height / FIELD.height);
-    view.x = (width - FIELD.width * view.scale) / 2;
-    view.y = (height - FIELD.height * view.scale) / 2;
-  }
-
-  const fonts = new Map();
-  function text(value, x, y, size, color, align) {
-    if (!fonts.has(size)) fonts.set(size, `${size}px ${FONT}`);
-    context.font = fonts.get(size);
-    context.fillStyle = color;
-    context.textAlign = align;
-    context.fillText(value, x, y);
-  }
-
-  function drawField(state) {
-    context.fillStyle = PALETTE.sky;
-    context.fillRect(0, 0, FIELD.width, FIELD.height);
-    context.fillStyle = PALETTE.ground;
-    context.fillRect(0, FIELD.groundY, FIELD.width, FIELD.height - FIELD.groundY);
-
-    const items = state.items;
-    for (let index = 0; index < items.length; index += 1) {
-      const item = items[index];
-      if (!item.active) continue;
-      if (item.kind === KIND_COIN) {
-        context.fillStyle = PALETTE.coin;
-        context.beginPath();
-        context.arc(item.x + item.width / 2, item.y + item.height / 2, item.width / 2, 0, Math.PI * 2);
-        context.fill();
-      } else {
-        context.fillStyle = PALETTE.block;
-        context.fillRect(item.x, item.y, item.width, item.height);
-      }
+export class CameraRig {
+    constructor() {
+        this.yaw = 0;
+        this.pitch = 0.32;
+        this.distance = 7.5;
+        this.targetDistance = 7.5;
+        this.trauma = 0;
+        this.shakeT = 0;
+        this.fov = 68;
+        this.currentPos = new THREE.Vector3();
+        this.currentLook = new THREE.Vector3();
+        this.cutsceneActive = false;
+        this.cutFrom = new THREE.Vector3();
+        this.cutTo = new THREE.Vector3();
+        this.cutLookFrom = new THREE.Vector3();
+        this.cutLookTo = new THREE.Vector3();
+        this.cutT = 0;
+        this.cutDur = 1;
     }
-
-    const player = state.player;
-    // Blink while invulnerable after a hit: hidden on every other tenth of a second.
-    if (player.invulnerable === 0 || Math.floor(player.invulnerable * 10) % 2 === 1) {
-      context.fillStyle = PALETTE.player;
-      context.fillRect(player.x, player.y, player.width, player.height);
+    addTrauma(amount) {
+        this.trauma = clamp(this.trauma + amount, 0, 1);
     }
-  }
-
-  function drawHud(state) {
-    context.textBaseline = 'top';
-    text(scoreLabel(state.score), 24, 20, 28, PALETTE.text, 'left');
-    text(levelLabel(state.level), FIELD.width / 2, 20, 28, PALETTE.text, 'center');
-    const firstLife = FIELD.width - 24 - LIVES * (LIFE_SIZE + LIFE_GAP) + LIFE_GAP;
-    text('Lives', firstLife - 12, 20, 28, PALETTE.text, 'right');
-    for (let life = 0; life < LIVES; life += 1) {
-      context.fillStyle = life < state.lives ? PALETTE.player : PALETTE.ground;
-      context.fillRect(firstLife + life * (LIFE_SIZE + LIFE_GAP), 24, LIFE_SIZE, LIFE_SIZE);
+    setCutscene(from, to, lookFrom, lookTo, dur) {
+        this.cutsceneActive = true;
+        this.cutFrom.copy(from);
+        this.cutTo.copy(to);
+        this.cutLookFrom.copy(lookFrom);
+        this.cutLookTo.copy(lookTo);
+        this.cutT = 0;
+        this.cutDur = Math.max(0.5, dur);
     }
-  }
-
-  function drawPanel(title, lines, prompt) {
-    const height = PANEL.top + lines.length * PANEL.line + PANEL.bottom;
-    const x = (FIELD.width - PANEL.width) / 2;
-    const y = (FIELD.height - height) / 2;
-    context.fillStyle = PALETTE.panel;
-    context.fillRect(x, y, PANEL.width, height);
-    context.textBaseline = 'alphabetic';
-    text(title, FIELD.width / 2, y + 78, 48, PALETTE.text, 'center');
-    for (let index = 0; index < lines.length; index += 1) {
-      text(lines[index], FIELD.width / 2, y + PANEL.top + index * PANEL.line, 22, PALETTE.muted, 'center');
+    endCutscene() {
+        this.cutsceneActive = false;
     }
-    text(prompt, FIELD.width / 2, y + height - 40, 24, PALETTE.coin, 'center');
-  }
-
-  const TITLE_LINES = ['Dodge the red blocks. Catch the gold coins.', 'Move with ← → or A D.  Pause with P.', ''];
-  const PAUSED_LINES = ['The blocks will wait for you.'];
-  const OVER_LINES = ['', ''];
-
-  /** Paint one frame: the field, then the HUD or a panel for the screen the game is on. */
-  function draw(state, screen, best) {
-    context.setTransform(1, 0, 0, 1, 0, 0);
-    context.fillStyle = PALETTE.backdrop;
-    context.fillRect(0, 0, canvas.width, canvas.height);
-    context.setTransform(view.scale, 0, 0, view.scale, view.x, view.y);
-    drawField(state);
-    if (screen === SCREEN_TITLE) {
-      TITLE_LINES[2] = bestLabel(best);
-      drawPanel('Block Dodger', TITLE_LINES, 'Press Space or click to start');
-      return;
+    isCutscene() {
+        return this.cutsceneActive;
     }
-    drawHud(state);
-    if (screen === SCREEN_PAUSED) drawPanel('Paused', PAUSED_LINES, 'Press P to resume');
-    else if (screen === SCREEN_OVER) {
-      OVER_LINES[0] = finalLabel(state.score);
-      OVER_LINES[1] = bestLabel(best);
-      drawPanel('Game over', OVER_LINES, 'Press Space or click to play again');
+    update(dt, target, speed, city, camera, aiming) {
+        const realDt = dt;
+        if (this.trauma > 0) {
+            this.trauma = Math.max(0, this.trauma - 1.4 * realDt);
+            this.shakeT += realDt * 31;
+        }
+        const wantFov = aiming ? 58 : 68 + clamp(speed / 50, 0, 1) * 12;
+        this.fov = lerp(this.fov, wantFov, 1 - Math.exp(-6 * dt));
+        if (Math.abs(camera.fov - this.fov) > 0.05) {
+            camera.fov = this.fov;
+            camera.updateProjectionMatrix();
+        }
+        this.targetDistance = aiming ? 4.2 : 7.5;
+        // While aiming, ease the camera toward level so the crosshair sits
+        // near the bullet line instead of pointing at the ground ahead.
+        if (aiming)
+            this.pitch = lerp(this.pitch, 0.12, 1 - Math.exp(-6 * dt));
+        if (this.cutsceneActive) {
+            this.cutT += dt;
+            const t = clamp(this.cutT / this.cutDur, 0, 1);
+            const e = t * t * (3 - 2 * t);
+            const pos = new THREE.Vector3().lerpVectors(this.cutFrom, this.cutTo, e);
+            const look = new THREE.Vector3().lerpVectors(this.cutLookFrom, this.cutLookTo, e);
+            this.applyShake(camera, pos, look);
+            return;
+        }
+        // Spring-damped distance: pull in fast, ease out slow.
+        const rate = this.distance > this.targetDistance ? 14 : 5;
+        this.distance = lerp(this.distance, this.targetDistance, 1 - Math.exp(-rate * dt));
+        const lookTarget = new THREE.Vector3(target.x, target.y + 1.7, target.z);
+        const sinP = Math.sin(this.pitch);
+        const cosP = Math.cos(this.pitch);
+        const offset = new THREE.Vector3(-Math.sin(this.yaw) * cosP, sinP, -Math.cos(this.yaw) * cosP);
+        let dist = this.distance;
+        // Collision pull-in: step the camera ray back until it clears buildings.
+        const dir = offset.clone().normalize();
+        for (let d = dist; d > 1.2; d -= 0.6) {
+            const p = new THREE.Vector3().copy(lookTarget).addScaledVector(dir, d);
+            if (p.y < 0.6) {
+                dist = d;
+                break;
+            }
+            if (city.collidesCircle(p.x, p.z, 0.4)) {
+                dist = Math.max(1.2, d - 0.6);
+                break;
+            }
+        }
+        const desired = new THREE.Vector3().copy(lookTarget).addScaledVector(dir, dist);
+        if (desired.y < 0.7)
+            desired.y = 0.7;
+        const k = 1 - Math.exp(-18 * dt);
+        this.currentPos.lerp(desired, k);
+        this.currentLook.lerp(lookTarget, 1 - Math.exp(-22 * dt));
+        this.applyShake(camera, this.currentPos, this.currentLook);
     }
-  }
-
-  resize();
-  window.addEventListener('resize', resize);
-  return { draw };
+    applyShake(camera, pos, look) {
+        const s = this.trauma * this.trauma;
+        const ox = 0.35 * s * Math.sin(this.shakeT * 1.7);
+        const oy = 0.28 * s * Math.sin(this.shakeT * 2.3);
+        const oz = 0.35 * s * Math.sin(this.shakeT * 1.1);
+        camera.position.set(pos.x + ox, pos.y + oy, pos.z + oz);
+        camera.lookAt(look);
+    }
+    snapTo(target) {
+        const lookTarget = new THREE.Vector3(target.x, target.y + 1.7, target.z);
+        const sinP = Math.sin(this.pitch);
+        const cosP = Math.cos(this.pitch);
+        this.currentPos.set(lookTarget.x - Math.sin(this.yaw) * cosP * this.distance, lookTarget.y + sinP * this.distance, lookTarget.z - Math.cos(this.yaw) * cosP * this.distance);
+        this.currentLook.copy(lookTarget);
+    }
+}
+// Pooled point particles: sparks, smoke puffs, blood hits, explosion debris.
+// One THREE.Points draw call, fixed capacity, recycled slots.
+export class Particles {
+    constructor(scene) {
+        this.capacity = 700;
+        this.rng = new Rng(987654321);
+        this.head = 0;
+        this.positions = new Float32Array(this.capacity * 3);
+        this.colors = new Float32Array(this.capacity * 3);
+        this.vel = new Float32Array(this.capacity * 3);
+        this.life = new Float32Array(this.capacity);
+        this.maxLife = new Float32Array(this.capacity);
+        this.geo = new THREE.BufferGeometry();
+        this.geo.setAttribute('position', new THREE.BufferAttribute(this.positions, 3));
+        this.geo.setAttribute('color', new THREE.BufferAttribute(this.colors, 3));
+        const mat = new THREE.PointsMaterial({ size: 0.35, vertexColors: true, transparent: true, opacity: 0.95, depthWrite: false });
+        this.points = new THREE.Points(this.geo, mat);
+        this.points.frustumCulled = false;
+        for (let i = 0; i < this.capacity; i++)
+            this.positions[i * 3 + 1] = -100;
+        scene.add(this.points);
+    }
+    spawn(x, y, z, vx, vy, vz, life, r, g, b) {
+        const i = this.head;
+        this.head = (this.head + 1) % this.capacity;
+        this.positions[i * 3] = x;
+        this.positions[i * 3 + 1] = y;
+        this.positions[i * 3 + 2] = z;
+        this.vel[i * 3] = vx;
+        this.vel[i * 3 + 1] = vy;
+        this.vel[i * 3 + 2] = vz;
+        this.colors[i * 3] = r;
+        this.colors[i * 3 + 1] = g;
+        this.colors[i * 3 + 2] = b;
+        this.life[i] = life;
+        this.maxLife[i] = life;
+    }
+    burst(pos, count, speed, life, r, g, b, up = 0.5) {
+        for (let i = 0; i < count; i++) {
+            const a = this.rng.next() * Math.PI * 2;
+            const s = speed * (0.3 + this.rng.next() * 0.7);
+            this.spawn(pos.x, pos.y, pos.z, Math.cos(a) * s, up * speed * this.rng.next(), Math.sin(a) * s, life * (0.6 + this.rng.next() * 0.7), r, g, b);
+        }
+    }
+    update(dt) {
+        for (let i = 0; i < this.capacity; i++) {
+            if (this.life[i] <= 0)
+                continue;
+            this.life[i] -= dt;
+            if (this.life[i] <= 0) {
+                this.positions[i * 3 + 1] = -100;
+                continue;
+            }
+            this.vel[i * 3 + 1] -= 6 * dt;
+            this.positions[i * 3] += this.vel[i * 3] * dt;
+            this.positions[i * 3 + 1] += this.vel[i * 3 + 1] * dt;
+            this.positions[i * 3 + 2] += this.vel[i * 3 + 2] * dt;
+        }
+        this.geo.attributes.position.needsUpdate = true;
+        this.geo.attributes.color.needsUpdate = true;
+    }
 }
