@@ -3,16 +3,222 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Block Dodger</title>
+<link rel="icon" href="data:,">
+<title>Solmar Sunset</title>
 <style>
-  html, body { margin: 0; height: 100%; overflow: hidden; background: #11141b; }
+  :root {
+    --amber: #ffb347;
+    --teal: #2fd4c4;
+    --blue: #4aa8ff;
+    --red: #ff5a4a;
+    --panel: rgba(12, 16, 22, 0.72);
+    --line: rgba(255, 255, 255, 0.14);
+  }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0e1420; font-family: 'Arial Narrow', 'Helvetica Neue', Arial, sans-serif; }
   #game { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
-  /* Read aloud, never shown: the status line screen readers announce. */
+  #hud { position: fixed; inset: 0; pointer-events: none; color: #f2ede4; user-select: none; }
+  #hud.menu-open #hud-live { opacity: 0.25; }
+  .panel { background: var(--panel); border: 1px solid var(--line); }
+
+  /* Bottom-left: minimap + bars */
+  #hud-bl { position: absolute; left: 18px; bottom: 18px; display: flex; align-items: flex-end; gap: 14px; }
+  #minimap { width: 220px; height: 220px; border-radius: 50%; border: 3px solid var(--amber); background: #123; display: block; }
+  #bars { width: 210px; padding-bottom: 4px; }
+  .bar-row { display: flex; align-items: center; gap: 8px; margin-top: 7px; }
+  .bar-label { font-size: 11px; letter-spacing: 2px; width: 46px; color: #cfc8b8; }
+  .bar { flex: 1; height: 10px; background: rgba(255,255,255,0.16); border: 1px solid rgba(0,0,0,0.4); }
+  .bar > div { height: 100%; transition: width 150ms ease-out; }
+  #health-fill { background: var(--teal); width: 100%; }
+  #armor-fill { background: var(--blue); width: 0%; }
+  #vehhp-fill { background: var(--amber); width: 100%; }
+  #speed { margin-top: 8px; font-size: 30px; font-weight: 900; line-height: 1; color: #fff; text-shadow: 0 2px 6px rgba(0,0,0,0.6); }
+  #speed small { font-size: 12px; font-weight: 700; color: var(--amber); letter-spacing: 2px; }
+
+  /* Top-right: stars, cash, weapon */
+  #hud-tr { position: absolute; right: 20px; top: 16px; text-align: right; }
+  #stars { font-size: 26px; letter-spacing: 4px; line-height: 1; }
+  .star-on { color: #ffd23c; text-shadow: 0 0 10px rgba(255,210,60,0.7); }
+  .star-off { color: rgba(255,255,255,0.22); }
+  #cash { margin-top: 6px; font-size: 30px; font-weight: 900; color: #7ee2a0; text-shadow: 0 2px 6px rgba(0,0,0,0.6); }
+  #weapon-name { margin-top: 2px; font-size: 15px; font-weight: 700; letter-spacing: 1px; color: #f2ede4; }
+  #weapon-ammo { font-size: 15px; color: var(--amber); font-weight: 700; }
+
+  /* Top-center: radio + district */
+  #hud-tc { position: absolute; left: 50%; top: 14px; transform: translateX(-50%); text-align: center; }
+  #radio { font-size: 12px; letter-spacing: 3px; color: #cfc8b8; }
+  #district { margin-top: 4px; font-size: 34px; font-weight: 900; letter-spacing: 6px; color: #fff; text-shadow: 0 3px 10px rgba(0,0,0,0.7); }
+  #district.pop { animation: districtpop 260ms ease-out; }
+  @keyframes districtpop { from { transform: scale(0.94); opacity: 0.4; } to { transform: scale(1); opacity: 1; } }
+
+  /* Objective top-left */
+  #objective { position: absolute; left: 20px; top: 16px; max-width: 380px; font-size: 16px; font-weight: 700; padding: 10px 14px; border-left: 4px solid var(--amber); display: none; }
+
+  /* Subtitles + prompt + toast */
+  #subtitle { position: absolute; left: 50%; bottom: 130px; transform: translateX(-50%); max-width: 640px; text-align: center; padding: 10px 18px; background: rgba(0,0,0,0.72); display: none; }
+  #subtitle.visible { display: block; }
+  #subtitle-speaker { color: var(--amber); font-weight: 900; letter-spacing: 2px; font-size: 13px; }
+  #subtitle-text { font-size: 18px; line-height: 1.35; margin-top: 2px; }
+  #prompt { position: absolute; left: 50%; bottom: 88px; transform: translateX(-50%); font-size: 16px; font-weight: 700; padding: 8px 16px; background: rgba(0,0,0,0.66); border: 1px solid var(--line); display: none; }
+  #prompt.visible { display: block; }
+  #toast { position: absolute; left: 50%; top: 96px; transform: translateX(-50%); font-size: 17px; font-weight: 700; padding: 9px 18px; background: var(--panel); border-left: 4px solid var(--amber); display: none; }
+  #toast.visible { display: block; }
+
+  /* Letterbox bars during cutscenes */
+  .letterbox { position: absolute; left: 0; right: 0; height: 0; background: #000; transition: height 280ms ease-out; z-index: 5; }
+  #letterbox-top { top: 0; }
+  #letterbox-bottom { bottom: 0; }
+  body.cutscene .letterbox { height: 9vh; }
+
+  /* Menus */
+  .menu { position: absolute; inset: 0; display: none; align-items: center; background: rgba(8, 12, 20, 0.55); pointer-events: auto; z-index: 10; }
+  .menu.visible { display: flex; }
+  .menu-card { margin-left: 7vw; max-width: 560px; }
+  .menu-card h1 { font-size: 64px; line-height: 0.95; margin: 0; font-weight: 900; letter-spacing: 2px; color: var(--amber); text-shadow: 0 4px 24px rgba(0,0,0,0.8); }
+  .menu-card h1 span { color: #fff; }
+  .menu-card h2 { font-size: 40px; margin: 0 0 8px; font-weight: 900; letter-spacing: 3px; color: var(--amber); }
+  .menu-card p { font-size: 17px; line-height: 1.5; color: #e8e2d4; }
+  .menu-card .sub { font-size: 15px; letter-spacing: 3px; color: var(--teal); font-weight: 700; margin: 10px 0 22px; }
+  .btn { display: block; width: 300px; margin: 10px 0; padding: 13px 18px; background: rgba(12,16,22,0.85); color: #f2ede4; border: 1px solid var(--line); border-left: 4px solid var(--amber); font-family: inherit; font-size: 17px; font-weight: 700; letter-spacing: 1px; text-align: left; cursor: pointer; transition: transform 150ms ease-out, background 150ms ease-out; }
+  .btn:hover { background: rgba(255,179,71,0.16); transform: translateX(4px); }
+  .btn:active { transform: scale(0.97); }
+  .btn.primary { background: var(--amber); color: #17120a; border-left-color: #fff; }
+  .btn.primary:hover { background: #ffc46b; }
+  .btn-row { display: flex; gap: 10px; }
+  .btn-row .btn { width: auto; flex: 1; text-align: center; border-left: 1px solid var(--line); }
+  .btn-row .btn.on { background: var(--amber); color: #17120a; }
+  .shop-item { display: flex; justify-content: space-between; align-items: center; width: 420px; padding: 12px 16px; margin: 8px 0; background: rgba(12,16,22,0.85); border: 1px solid var(--line); border-left: 4px solid var(--teal); cursor: pointer; font-size: 16px; font-weight: 700; }
+  .shop-item:hover { background: rgba(47,212,196,0.14); }
+  .shop-item span:last-child { color: var(--amber); }
+  #shop-note { font-size: 14px; color: #cfc8b8; }
+  .controls-list { font-size: 16px; line-height: 1.9; color: #e8e2d4; }
+  .controls-list b { color: var(--amber); }
+  #dead-title { font-size: 84px; color: #fff; letter-spacing: 8px; font-weight: 900; text-shadow: 0 6px 30px rgba(0,0,0,0.9); margin: 0; }
+  #complete-stats { font-size: 18px; }
+
+  /* Full city map overlay */
+  #map-overlay { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(8,12,20,0.8); pointer-events: auto; z-index: 9; }
+  #map-overlay.visible { display: flex; }
+  #fullmap { width: min(78vh, 78vw); height: min(78vh, 78vw); border: 3px solid var(--amber); background: #123; }
+  #map-overlay p { position: absolute; bottom: 24px; color: #cfc8b8; font-size: 14px; letter-spacing: 2px; }
+
+  /* Loading */
+  #loading { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; background: #0e1420; z-index: 20; color: #f2ede4; }
+  #loading h1 { font-size: 52px; margin: 0; color: var(--amber); letter-spacing: 4px; font-weight: 900; }
+  #loading-text { margin-top: 12px; font-size: 16px; color: #cfc8b8; letter-spacing: 2px; }
   #status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 </style>
+<script type="importmap">
+{ "imports": { "three": "./vendor/three.module.min.js" } }
+</script>
 </head>
 <body>
-<canvas id="game" aria-label="Block Dodger: move the paddle left and right to dodge falling blocks and catch coins"></canvas>
+<canvas id="game" aria-label="Solmar Sunset: an open-world crime game"></canvas>
+<div id="hud">
+  <div id="hud-live">
+    <div id="hud-bl">
+      <canvas id="minimap" width="220" height="220"></canvas>
+      <div id="bars">
+        <div class="bar-row"><span class="bar-label">HEALTH</span><div class="bar"><div id="health-fill"></div></div></div>
+        <div class="bar-row"><span class="bar-label">ARMOR</span><div class="bar"><div id="armor-fill"></div></div></div>
+        <div class="bar-row" id="vehhp-row" style="display:none"><span class="bar-label">CAR</span><div class="bar"><div id="vehhp-fill"></div></div></div>
+        <div id="speed" style="display:none"><span id="speed-val"></span> <small>MPH</small></div>
+      </div>
+    </div>
+    <div id="hud-tr">
+      <div id="stars"><span class="star-off">★★★★★</span></div>
+      <div id="cash">$250</div>
+      <div id="weapon-name">Fists</div>
+      <div id="weapon-ammo"></div>
+    </div>
+    <div id="hud-tc">
+      <div id="radio">RADIO OFF</div>
+      <div id="district">Centro Solmar</div>
+    </div>
+    <div id="objective" class="panel"></div>
+    <div id="subtitle"><div id="subtitle-speaker"></div><div id="subtitle-text"></div></div>
+    <div id="prompt"></div>
+    <div id="toast"></div>
+  </div>
+  <div class="letterbox" id="letterbox-top"></div>
+  <div class="letterbox" id="letterbox-bottom"></div>
+
+  <div class="menu" id="menu-title">
+    <div class="menu-card">
+      <h1>SOLMAR<br><span>SUNSET</span></h1>
+      <div class="sub">A SOLMAR STORY - MARA VOSS</div>
+      <button class="btn primary" id="btn-newgame">New Game</button>
+      <button class="btn" id="btn-continue">Continue</button>
+      <button class="btn" id="btn-controls">Controls</button>
+      <div class="btn-row" style="width:300px">
+        <button class="btn" id="quality-low">Low</button>
+        <button class="btn on" id="quality-medium">Med</button>
+        <button class="btn" id="quality-high">High</button>
+      </div>
+      <p>Steal cars, dodge SMPD, run four jobs for Mateo Cruz, and take back Solmar from the Vespera Syndicate. W A S D to move, mouse to look, E to enter cars.</p>
+    </div>
+  </div>
+
+  <div class="menu" id="menu-controls">
+    <div class="menu-card">
+      <h2>CONTROLS</h2>
+      <div class="controls-list">
+        <b>W A S D</b> move / drive &nbsp; <b>Shift</b> sprint &nbsp; <b>Space</b> drift<br>
+        <b>Mouse</b> look &nbsp; <b>Right click</b> aim &nbsp; <b>Left click</b> fire / punch<br>
+        <b>E / F</b> enter / exit car, interact &nbsp; <b>R</b> reload<br>
+        <b>1 2 3 4</b> weapons &nbsp; <b>Tab</b> radio &nbsp; <b>M</b> city map<br>
+        <b>Esc</b> pause &nbsp; <b>Enter</b> skip cutscene
+      </div>
+      <button class="btn" id="btn-controls-back">Back</button>
+    </div>
+  </div>
+
+  <div class="menu" id="menu-pause">
+    <div class="menu-card">
+      <h2>PAUSED</h2>
+      <button class="btn primary" id="btn-resume">Resume</button>
+      <button class="btn" id="btn-map">Full City Map</button>
+      <button class="btn" id="btn-restart-mission">Restart Mission</button>
+      <button class="btn" id="btn-save">Save Game</button>
+      <button class="btn" id="btn-quit">Quit to Title</button>
+    </div>
+  </div>
+
+  <div class="menu" id="menu-shop">
+    <div class="menu-card">
+      <h2 id="shop-title">VOSS CUSTOMS</h2>
+      <p id="shop-note">Pay once, drive forever.</p>
+      <div class="shop-item" id="shop-armor"><span>Kevlar Body Armor (+100 AP)</span><span id="price-armor">$500</span></div>
+      <div class="shop-item" id="shop-ammo"><span>Ammo restock (current weapon)</span><span id="price-ammo">$100</span></div>
+      <div class="shop-item" id="shop-repair"><span>Repair vehicle to 100%</span><span id="price-repair">$200</span></div>
+      <div class="shop-item" id="shop-respray"><span>Respray + clear wanted level</span><span id="price-respray">$200</span></div>
+      <button class="btn" id="btn-shop-close">Close</button>
+    </div>
+  </div>
+
+  <div class="menu" id="menu-dead">
+    <div class="menu-card">
+      <h1 id="dead-title">WASTED</h1>
+      <p>Mara wakes up at the Safehouse Motel, $100 lighter, mission failed. Solmar is still out there.</p>
+      <button class="btn primary" id="btn-dead-retry">Respawn ($100)</button>
+    </div>
+  </div>
+
+  <div class="menu" id="menu-complete">
+    <div class="menu-card">
+      <h1>SOLMAR<br><span>SUNSET</span></h1>
+      <div class="sub">STORY COMPLETE</div>
+      <p id="complete-stats"></p>
+      <p>Endless Free Roam is open, with a 50% discount at every shop.</p>
+      <button class="btn primary" id="btn-complete-roam">Keep Driving</button>
+    </div>
+  </div>
+
+  <div id="map-overlay">
+    <canvas id="fullmap" width="900" height="900"></canvas>
+    <p>SOLMAR - PRESS M TO CLOSE</p>
+  </div>
+</div>
+<div id="loading"><h1>SOLMAR SUNSET</h1><div id="loading-text">Building Solmar...</div></div>
 <p id="status" role="status" aria-live="polite"></p>
 <script type="module" src="./src/main.js"></script>
 </body>
