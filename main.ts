@@ -1,12 +1,14 @@
-// A working gta6-01 entry (Node 22, standard library only): the game is this directory's
-// game/ folder, plain static files a desktop browser loads offline (game/index.html and its ES
-// modules, no library and no network request), and the program hands it in. It copies game/ and
-// screenshots/ from beside this file to /output and writes /output/dossier.json, the summary the
-// judge reads, with the vendored make.fun library. Only the plumbing, not an open world: Block
-// Dodger, a plain 2D canvas game where a paddle dodges falling blocks and catches coins, with a
-// title screen, score, lives and levels, game over and restart, flat colours and no sound. Build
-// your own open-world crime game in its place (three.js or any library you vendor under game/),
-// put your 3 or 4 PNG or JPEG screenshots in screenshots/ (the first by name is the cover) and run it.
+// Solmar Sunset, an entry for the make.fun gta6-01 bounty: a 3D open-world
+// crime game (Node 22, standard library only). The game is this directory's
+// game/ folder, plain static files a desktop browser loads offline
+// (game/index.html and its ES modules, Three.js vendored under game/vendor,
+// no network request), and the program hands it in. It copies game/ and
+// screenshots/ from beside this file to /output and writes /output/dossier.json,
+// the summary the judge reads, with the vendored make.fun library. The game
+// itself: Mara Voss runs four story jobs across the coastal city of Solmar
+// (drive, steal, shoot, evade SMPD), then free roam. Build it with
+// `npm run build` (tsc to game/src plus an offline audit), play it with
+// `node serve.ts`, and capture its screenshots with `npm run shots`.
 //
 // Serve it locally with `node serve.ts`, then open http://localhost:8080.
 // Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
