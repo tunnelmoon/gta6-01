@@ -1,204 +1,234 @@
-// Wanted system: heat 0-100, 1-5 stars, police pursuit units, roadblocks
-// at 3+ stars, SWAT at 4+. Police vision cones feed the minimap; breaking
-// line of sight outside every cone cools the heat down.
-import * as THREE from 'three';
-import { WANTED, clamp } from './config.js';
+// Wanted system: heat, stars, police pursuit, roadblocks, vision cones,
+// and the Voss Customs clean-up.
 import { City } from './city.js';
 import { Rng } from './rng.js';
-import { Vehicle, makeVehicle } from './vehicles.js';
+import { PLACES, WANTED, clamp } from './config.js';
+import { Vehicle } from './vehicles.js';
 
 export interface VisionCone {
   x: number;
   z: number;
   heading: number;
   range: number;
+  angle: number;
 }
 
-export class Police {
+export class Wanted {
   heat = 0;
-  units: Vehicle[] = [];
-  roadblocks: Vehicle[] = [];
-  onBusted: (() => void) | null = null;
-  onShoot: ((from: THREE.Vector3, to: THREE.Vector3) => void) | null = null;
-  private scene: THREE.Scene;
-  private city: City;
-  private rng: Rng;
-  private bustTimer = 0;
-  private shootTimer = 0;
-  private spawnTimer = 0;
+  stars = 0;
+  private unseenTimer = 0;
 
-  constructor(scene: THREE.Scene, city: City, seed: number) {
-    this.scene = scene;
-    this.city = city;
-    this.rng = new Rng(seed);
-  }
-
-  getStars(): number {
-    if (this.heat <= 0) return 0;
-    return clamp(Math.ceil(this.heat / 20), 1, 5);
+  get level(): number {
+    return this.stars;
   }
 
   addHeat(amount: number): void {
-    this.heat = clamp(this.heat + amount, 0, WANTED.maxHeat);
+    this.heat = clamp(this.heat + amount, 0, 100);
+    // gaining heat means the player was just active/seen: restart the
+    // grace period before decay, so a fresh wanted level never drops
+    // a star on the very next frame
+    if (amount > 0) this.unseenTimer = 0;
+    this.recompute();
   }
 
-  clearWanted(): void {
+  clear(): void {
     this.heat = 0;
-    for (const u of this.units) u.dispose(this.scene);
-    this.units = [];
-    for (const r of this.roadblocks) r.dispose(this.scene);
-    this.roadblocks = [];
+    this.stars = 0;
+    this.unseenTimer = 0;
   }
 
-  isSeen(playerPos: THREE.Vector3): boolean {
+  private recompute(): void {
+    let s = 0;
+    for (let i = 5; i >= 1; i--) {
+      if (this.heat >= WANTED.starsForHeat[i]) {
+        s = i;
+        break;
+      }
+    }
+    this.stars = s;
+  }
+
+  // Heat decays only while no police unit can see the player.
+  update(dt: number, seen: boolean): void {
+    if (seen) {
+      this.unseenTimer = 0;
+    } else {
+      this.unseenTimer += dt;
+      if (this.unseenTimer > WANTED.unseenSecondsToCool && this.heat > 0) {
+        this.heat = Math.max(0, this.heat - WANTED.decayPerSecond * dt);
+        this.recompute();
+      }
+    }
+  }
+}
+
+export interface PoliceCallbacks {
+  onBusted: () => void;
+  onShootPlayer: (damage: number, fromX: number, fromZ: number) => void;
+  onExplosion: (x: number, y: number, z: number) => void;
+}
+
+export class PoliceUnit {
+  vehicle: Vehicle;
+  shootCooldown = 0;
+  bustedTimer = 0;
+  isRoadblock = false;
+
+  constructor(vehicle: Vehicle) {
+    this.vehicle = vehicle;
+  }
+}
+
+export class Police {
+  units: PoliceUnit[] = [];
+  wanted = new Wanted();
+  private rng: Rng;
+  private time = 0;
+  private roadblockTimer = 0;
+
+  constructor(private city: City, private scene: import('three').Scene, seed = 23) {
+    this.rng = new Rng(seed);
+  }
+
+  // Is any police unit seeing the point (2D cone + line of sight)?
+  seesPoint(x: number, z: number): boolean {
     for (const u of this.units) {
-      if (this.inCone(u, playerPos)) return true;
+      const v = u.vehicle;
+      const dx = x - v.x;
+      const dz = z - v.z;
+      const d = Math.hypot(dx, dz);
+      if (d > WANTED.visionRange) continue;
+      const ang = Math.atan2(dx, dz);
+      let diff = ang - v.heading;
+      while (diff > Math.PI) diff -= Math.PI * 2;
+      while (diff < -Math.PI) diff += Math.PI * 2;
+      if (Math.abs(diff) > WANTED.visionAngle) continue;
+      if (!this.city.hasLineOfSight(v.x, v.z, x, z)) continue;
+      return true;
     }
     return false;
   }
 
-  private inCone(unit: Vehicle, p: THREE.Vector3): boolean {
-    const dx = p.x - unit.pos.x;
-    const dz = p.z - unit.pos.z;
-    const d = Math.hypot(dx, dz);
-    if (d > 70 || d < 1) return false;
-    const ang = Math.atan2(dx, dz);
-    let diff = ang - unit.heading;
-    while (diff > Math.PI) diff -= Math.PI * 2;
-    while (diff < -Math.PI) diff += Math.PI * 2;
-    if (Math.abs(diff) > 0.55) return false;
-    return this.hasLineOfSight(unit.pos, p);
+  cones(): VisionCone[] {
+    return this.units.map((u) => ({
+      x: u.vehicle.x,
+      z: u.vehicle.z,
+      heading: u.vehicle.heading,
+      range: WANTED.visionRange,
+      angle: WANTED.visionAngle,
+    }));
   }
 
-  private hasLineOfSight(a: THREE.Vector3, b: THREE.Vector3): boolean {
-    const steps = 8;
-    for (let i = 1; i < steps; i++) {
-      const t = i / steps;
-      const x = a.x + (b.x - a.x) * t;
-      const z = a.z + (b.z - a.z) * t;
-      if (this.city.collidesCircle(x, z, 0.3)) return false;
-    }
-    return true;
+  // Scripted spawns for missions: a police unit at an exact spot.
+  spawnUnitAt(kind: string, x: number, z: number): PoliceUnit {
+    return this.spawnUnit(kind, x, z);
   }
 
-  visionCones(): VisionCone[] {
-    return this.units.map((u) => ({ x: u.pos.x, z: u.pos.z, heading: u.heading, range: 70 }));
+  // A static blockade across a road (two cruisers side by side).
+  spawnRoadblockAt(x: number, z: number, heading: number): void {
+    for (const off of [-5, 5]) {
+      const u = this.spawnUnit('cruiser', x + Math.cos(heading) * off, z - Math.sin(heading) * off);
+      u.isRoadblock = true;
+      u.vehicle.heading = heading;
+    }
   }
 
-  private desiredUnits(): string[] {
-    const s = this.getStars();
-    if (s === 0) return [];
-    if (s === 1) return ['metroCruiser'];
-    if (s === 2) return ['metroCruiser', 'metroCruiser'];
-    if (s === 3) return ['metroCruiser', 'metroCruiser', 'interceptor'];
-    if (s === 4) return ['metroCruiser', 'interceptor', 'interceptor', 'enforcer'];
-    return ['interceptor', 'interceptor', 'enforcer', 'enforcer', 'metroCruiser'];
+  private spawnUnit(kind: string, x: number, z: number): PoliceUnit {
+    const v = new Vehicle(kind);
+    v.place(x, z, this.rng.range(0, Math.PI * 2));
+    const unit = new PoliceUnit(v);
+    this.units.push(unit);
+    this.scene.add(v.group);
+    return unit;
   }
 
-  update(dt: number, playerPos: THREE.Vector3, playerInVehicle: boolean, playerVehicle: Vehicle | null): void {
-    const stars = this.getStars();
-    // Heat decays only when no unit can see the player.
-    if (stars > 0 && !this.isSeen(playerPos)) {
-      this.heat = Math.max(0, this.heat - WANTED.decayPerSecond * dt);
+  private removeUnit(unit: PoliceUnit): void {
+    this.scene.remove(unit.vehicle.group);
+    this.units.splice(this.units.indexOf(unit), 1);
+  }
+
+  update(dt: number, px: number, pz: number, playerInVehicle: boolean, playerVehicle: Vehicle | null, cb: PoliceCallbacks): void {
+    this.time += dt;
+    const stars = this.wanted.stars;
+    const wantCount = WANTED.policePerStar[stars];
+    // spawn up to the wanted count, near the player but not on top of them
+    while (this.units.length < wantCount) {
+      const node = this.city.graph[this.rng.int(0, this.city.graph.length - 1)];
+      const d = Math.hypot(node.x - px, node.z - pz);
+      if (d < 55 || d > 160) continue;
+      const kind = stars >= 4 ? (this.rng.chance(0.5) ? 'enforcer' : 'interceptor') : stars >= 3 ? 'interceptor' : 'cruiser';
+      this.spawnUnit(kind, node.x, node.z);
     }
-    // Spawn / despawn pursuit units.
-    this.spawnTimer -= dt;
-    const want = this.desiredUnits();
-    if (this.spawnTimer <= 0) {
-      this.spawnTimer = 1.5;
-      while (this.units.length < want.length) {
-        const defId = want[this.units.length];
-        const node = this.randomSpawnNode(playerPos);
-        const unit = makeVehicle(defId, this.scene, this.rng);
-        unit.ai = true;
-        unit.place(node.x, node.z, Math.atan2(playerPos.x - node.x, playerPos.z - node.z));
-        this.units.push(unit);
-      }
-      while (this.units.length > want.length) {
-        const u = this.units.pop()!;
-        u.dispose(this.scene);
-      }
-    }
-    // Roadblocks at 3+ stars: two parked cruisers ahead of the player.
-    if (stars >= 3 && this.roadblocks.length === 0) {
-      const node = this.city.nearestNode(playerPos.x, playerPos.z);
-      for (const off of [-14, 14]) {
-        const rb = makeVehicle('metroCruiser', this.scene, this.rng);
-        rb.ai = true;
-        rb.place(node.x + off, node.z + 40, Math.PI);
-        this.roadblocks.push(rb);
-      }
-    }
-    if (stars < 3) {
-      for (const r of this.roadblocks) r.dispose(this.scene);
-      this.roadblocks = [];
-    }
-    // Pursuit driving: steer straight at the player, ram when close.
-    for (const unit of this.units) {
-      if (unit.exploded) continue;
-      const tx = playerPos.x - unit.pos.x;
-      const tz = playerPos.z - unit.pos.z;
-      const dist = Math.hypot(tx, tz);
-      const wantAngle = Math.atan2(tx, tz);
-      let diff = wantAngle - unit.heading;
-      while (diff > Math.PI) diff -= Math.PI * 2;
-      while (diff < -Math.PI) diff += Math.PI * 2;
-      let throttle = 1;
-      if (dist < 7) throttle = playerInVehicle ? 0.6 : -0.5;
-      if (unit.speed > unit.def.topSpeed * 0.92) throttle = 0.2;
-      unit.update(dt, { throttle, steer: clamp(diff * 2.2, -1, 1), drift: Math.abs(diff) > 1.2, horn: false }, this.city);
-      // Ram damage to the player's car.
-      if (playerInVehicle && playerVehicle && dist < (unit.radius + playerVehicle.radius) * 0.9) {
-        playerVehicle.damage(6 * dt);
-        unit.damage(3 * dt);
-      }
-      // Bust: a cop standing next to an on-foot player.
-      if (!playerInVehicle && dist < 4) {
-        this.bustTimer += dt;
-        if (this.bustTimer > 2.5 && this.onBusted) {
-          this.bustTimer = 0;
-          this.onBusted();
-        }
-      }
-    }
-    if (stars >= 2) {
-      this.bustTimer = Math.max(0, this.bustTimer - dt);
-      this.shootTimer -= dt;
-      if (this.shootTimer <= 0) {
-        this.shootTimer = 0.9;
-        for (const unit of this.units) {
-          const d = Math.hypot(playerPos.x - unit.pos.x, playerPos.z - unit.pos.z);
-          if (d < 45 && this.hasLineOfSight(unit.pos, playerPos) && this.onShoot) {
-            const from = unit.pos.clone();
-            from.y = 1.4;
-            const to = playerPos.clone();
-            to.y = 1.3;
-            this.onShoot(from, to);
-            break;
-          }
-        }
-      }
-    }
-    // Remove exploded units.
+    // despawn far units and dead ones
     for (let i = this.units.length - 1; i >= 0; i--) {
-      if (this.units[i].exploded) {
-        this.units[i].dispose(this.scene);
-        this.units.splice(i, 1);
+      const u = this.units[i];
+      const d = Math.hypot(u.vehicle.x - px, u.vehicle.z - pz);
+      if (u.vehicle.dead || d > 420) this.removeUnit(u);
+    }
+    // roadblocks at 3+ stars: two cruisers across a road ahead of the player
+    this.roadblockTimer -= dt;
+    if (stars >= 3 && this.roadblockTimer <= 0) {
+      this.roadblockTimer = 18;
+      const node = this.city.nearestNode(px + this.rng.range(-60, 60), pz + this.rng.range(-60, 60));
+      for (const off of [-6, 6]) {
+        const u = this.spawnUnit('cruiser', node.x + off, node.z);
+        u.isRoadblock = true;
+        u.vehicle.heading = Math.PI / 2;
       }
     }
-  }
-
-  private randomSpawnNode(playerPos: THREE.Vector3): { x: number; z: number } {
-    const nodes = Array.from(this.city.nodes.values());
-    for (let i = 0; i < 20; i++) {
-      const n = nodes[Math.floor(this.rng.next() * nodes.length)];
-      const d = Math.hypot(n.x - playerPos.x, n.z - playerPos.z);
-      if (d > 70 && d < 220) return n;
+    // pursuit AI
+    for (const u of this.units) {
+      const v = u.vehicle;
+      if (u.isRoadblock) continue;
+      const d = Math.hypot(px - v.x, pz - v.z);
+      // busted: on foot and a cop stands next to the player
+      if (!playerInVehicle && d < 3.2 && stars > 0) {
+        u.bustedTimer += dt;
+        if (u.bustedTimer > 1.5) {
+          cb.onBusted();
+          return;
+        }
+      } else {
+        u.bustedTimer = 0;
+      }
+      // shooting: stars 2+, in range, line of sight
+      u.shootCooldown -= dt;
+      if (stars >= 2 && d < 42 && u.shootCooldown <= 0 && this.city.hasLineOfSight(v.x, v.z, px, pz)) {
+        u.shootCooldown = 0.9 + this.rng.range(0, 0.7);
+        const hitChance = clamp(0.5 - d / 120, 0.1, 0.45);
+        if (this.rng.chance(hitChance)) cb.onShootPlayer(stars >= 4 ? 12 : 7, v.x, v.z);
+      }
+      // chase steering: aim at the player, ram when close
+      const wantHeading = Math.atan2(px - v.x, pz - v.z);
+      let dh = wantHeading - v.heading;
+      while (dh > Math.PI) dh -= Math.PI * 2;
+      while (dh < -Math.PI) dh += Math.PI * 2;
+      const steer = clamp(dh * 1.8, -1, 1);
+      const throttle = d > 10 ? 1 : d > 5 ? 0.5 : 0.2;
+      const others = this.units.map((o) => o.vehicle);
+      if (playerVehicle) others.push(playerVehicle);
+      v.update(dt, { throttle, steer, drift: false, brake: false }, this.city, others);
     }
-    return nodes[0];
+    // wanted decay
+    const seen = this.seesPoint(px, pz);
+    this.wanted.update(dt, seen);
   }
 
-  clear(): void {
-    this.clearWanted();
+  // Voss Customs: no police sight + inside the yard clears the heat and
+  // repairs the car for $200 (or whatever cash is left).
+  tryCustomsClear(px: number, pz: number, cash: number, vehicle: Vehicle | null): { cleared: boolean; cost: number } {
+    const d = Math.hypot(px - PLACES.vossCustoms.x, pz - PLACES.vossCustoms.z);
+    if (d > 30) return { cleared: false, cost: 0 };
+    if (this.seesPoint(px, pz)) return { cleared: false, cost: 0 };
+    if (this.wanted.stars === 0 && (!vehicle || vehicle.hp >= vehicle.spec.hp)) return { cleared: false, cost: 0 };
+    const cost = Math.min(200, cash);
+    this.wanted.clear();
+    if (vehicle) vehicle.repair();
+    return { cleared: true, cost };
+  }
+
+  reset(): void {
+    for (let i = this.units.length - 1; i >= 0; i--) this.removeUnit(this.units[i]);
+    this.wanted.clear();
   }
 }

@@ -1,227 +1,310 @@
-// HUD: all DOM chrome. Health/armor/speed/vehicle bars bottom-left beside
-// the minimap, stars/cash/weapon top-right, district banner, objective,
-// subtitles, interact prompt, toasts, and every menu (title, pause, shop,
-// wasted/busted, story complete, controls). Width-only bars: the fill
-// element's style.width carries the value.
-import { RadioStation } from './audio.js';
+// HUD: every DOM readout, menu, toast, subtitle and banner. The HTML
+// structure lives in game/index.html; this class owns its state.
+import { RADIO } from './config.js';
 
-export type MenuName = 'title' | 'pause' | 'shop' | 'dead' | 'complete' | 'controls' | 'none';
-
-export interface HudCallbacks {
-  onNewGame(): void;
-  onContinue(): void;
-  onResume(): void;
-  onRestartMission(): void;
-  onSave(): void;
-  onQuitToTitle(): void;
-  onQuality(q: string): void;
-  onShopBuy(item: string): void;
-  onCloseShop(): void;
-  onToggleMap(): void;
+export interface HudState {
+  health: number;
+  armor: number;
+  cash: number;
+  speedMph: number;
+  inVehicle: boolean;
+  vehHp: number;
+  vehHpMax: number;
+  stars: number;
+  weaponName: string;
+  clip: number;
+  reserve: number;
+  district: string;
+  objectiveTitle: string;
+  objectiveStep: string;
+  objectiveDist: number;
+  radio: string;
+  wanted: boolean;
 }
 
-export class Hud {
-  root: HTMLElement;
-  private starsEl: HTMLElement;
-  private cashEl: HTMLElement;
-  private weaponEl: HTMLElement;
-  private ammoEl: HTMLElement;
-  private healthFill: HTMLElement;
-  private armorFill: HTMLElement;
-  private speedEl: HTMLElement;
-  private speedVal: HTMLElement;
-  private vehicleHpFill: HTMLElement;
-  private vehicleRow: HTMLElement;
-  private districtEl: HTMLElement;
-  private radioEl: HTMLElement;
-  private objectiveEl: HTMLElement;
-  private subtitleEl: HTMLElement;
-  private subtitleSpeaker: HTMLElement;
-  private subtitleText: HTMLElement;
-  private promptEl: HTMLElement;
-  private toastEl: HTMLElement;
-  private toastTimer = 0;
-  private menus = new Map<MenuName, HTMLElement>();
-  private cb: HudCallbacks;
+export interface MenuCallbacks {
+  onNewGame: () => void;
+  onContinue: () => void;
+  onResume: () => void;
+  onRestartMission: () => void;
+  onSave: () => void;
+  onQuit: () => void;
+  onQuality: (q: 'low' | 'medium' | 'high') => void;
+  onVolume: (v: number) => void;
+}
 
-  constructor(cb: HudCallbacks) {
-    this.cb = cb;
-    this.root = document.getElementById('hud')!;
-    this.starsEl = document.getElementById('stars')!;
-    this.cashEl = document.getElementById('cash')!;
-    this.weaponEl = document.getElementById('weapon-name')!;
-    this.ammoEl = document.getElementById('weapon-ammo')!;
-    this.healthFill = document.getElementById('health-fill')!;
-    this.armorFill = document.getElementById('armor-fill')!;
-    this.speedEl = document.getElementById('speed')!;
-    this.speedVal = document.getElementById('speed-val')!;
-    this.vehicleHpFill = document.getElementById('vehhp-fill')!;
-    this.vehicleRow = document.getElementById('vehhp-row')!;
-    this.districtEl = document.getElementById('district')!;
-    this.radioEl = document.getElementById('radio')!;
-    this.objectiveEl = document.getElementById('objective')!;
-    this.subtitleEl = document.getElementById('subtitle')!;
-    this.subtitleSpeaker = document.getElementById('subtitle-speaker')!;
-    this.subtitleText = document.getElementById('subtitle-text')!;
-    this.promptEl = document.getElementById('prompt')!;
-    this.toastEl = document.getElementById('toast')!;
-    for (const name of ['title', 'pause', 'shop', 'dead', 'complete', 'controls'] as MenuName[]) {
-      const el = document.getElementById('menu-' + name);
-      if (el) this.menus.set(name, el);
+export class HUD {
+  private el: Record<string, HTMLElement> = {};
+  private lastDistrict = '';
+  private districtTimer = 0;
+  private toastTimer: number | null = null;
+  private subtitleTimer: number | null = null;
+  private hitTimer = 0;
+  private damageFlash = 0;
+
+  constructor(private cb: MenuCallbacks) {
+    const ids = [
+      'hud-live', 'hud', 'stars', 'cash', 'weapon-name', 'weapon-ammo', 'health-fill', 'armor-fill',
+      'speed-num', 'speed-label', 'veh-hp-fill', 'veh-hp-row', 'district', 'objective-title',
+      'objective-step', 'objective-dist', 'radio', 'crosshair', 'hitmarker', 'toast',
+      'subtitle', 'subtitle-speaker', 'subtitle-line', 'damage', 'letterbox-top',
+      'letterbox-bottom', 'interact', 'vault-wrap', 'vault-fill', 'title-screen',
+      'pause-menu', 'ending-screen', 'controls-screen', 'btn-new', 'btn-continue',
+      'btn-resume', 'btn-restart', 'btn-save', 'btn-quit', 'btn-controls', 'btn-back',
+      'quality', 'volume', 'ending-stats', 'loading', 'shop-panel', 'shop-title',
+      'shop-items', 'shop-close', 'minimap', 'wasted',
+    ];
+    for (const id of ids) {
+      const e = document.getElementById(id);
+      if (e) this.el[id] = e;
     }
-    this.wireButtons();
+    this.bind('btn-new', () => cb.onNewGame());
+    this.bind('btn-continue', () => cb.onContinue());
+    this.bind('btn-resume', () => cb.onResume());
+    this.bind('btn-restart', () => cb.onRestartMission());
+    this.bind('btn-save', () => cb.onSave());
+    this.bind('btn-quit', () => cb.onQuit());
+    this.bind('btn-controls', () => this.show('controls-screen'));
+    this.bind('btn-back', () => this.hide('controls-screen'));
+    this.bind('shop-close', () => this.hide('shop-panel'));
+    const q = this.el['quality'] as HTMLSelectElement | undefined;
+    if (q) q.addEventListener('change', () => cb.onQuality(q.value as 'low' | 'medium' | 'high'));
+    const v = this.el['volume'] as HTMLInputElement | undefined;
+    if (v) v.addEventListener('input', () => cb.onVolume(Number(v.value) / 100));
   }
 
-  private wireButtons(): void {
-    const bind = (id: string, fn: () => void) => {
-      const el = document.getElementById(id);
-      if (el) el.addEventListener('click', () => {
-        fn();
-      });
-    };
-    bind('btn-newgame', () => this.cb.onNewGame());
-    bind('btn-continue', () => this.cb.onContinue());
-    bind('btn-controls', () => this.showMenu('controls'));
-    bind('btn-controls-back', () => this.showMenu('title'));
-    bind('btn-resume', () => this.cb.onResume());
-    bind('btn-restart-mission', () => this.cb.onRestartMission());
-    bind('btn-save', () => this.cb.onSave());
-    bind('btn-quit', () => this.cb.onQuitToTitle());
-    bind('btn-map', () => this.cb.onToggleMap());
-    bind('btn-dead-retry', () => this.cb.onResume());
-    bind('btn-complete-roam', () => this.cb.onResume());
-    bind('btn-shop-close', () => this.cb.onCloseShop());
-    for (const item of ['armor', 'ammo', 'repair', 'respray']) {
-      bind('shop-' + item, () => this.cb.onShopBuy(item));
-    }
-    for (const q of ['low', 'medium', 'high']) {
-      bind('quality-' + q, () => this.cb.onQuality(q));
-    }
+  private bind(id: string, fn: () => void): void {
+    const e = this.el[id];
+    if (e) e.addEventListener('click', fn);
+  }
+  show(id: string): void {
+    this.el[id]?.classList.remove('hidden');
+  }
+  hide(id: string): void {
+    this.el[id]?.classList.add('hidden');
+  }
+  isShown(id: string): boolean {
+    return !!this.el[id] && !this.el[id].classList.contains('hidden');
   }
 
-  showMenu(name: MenuName): void {
-    for (const [key, el] of this.menus) {
-      el.classList.toggle('visible', key === name);
-    }
-    this.root.classList.toggle('menu-open', name !== 'none');
+  setLoading(text: string): void {
+    const e = this.el['loading'];
+    if (e) e.textContent = text;
+  }
+  hideLoading(): void {
+    this.hide('loading');
   }
 
-  hideMenus(): void {
-    this.showMenu('none');
+  showTitle(hasSave: boolean): void {
+    this.show('title-screen');
+    this.hide('pause-menu');
+    this.hide('ending-screen');
+    const c = this.el['btn-continue'];
+    if (c) c.classList.toggle('hidden', !hasSave);
+  }
+  hideTitle(): void {
+    this.hide('title-screen');
+  }
+  // The live HUD (minimap, bars, cash, stars, objective) starts hidden
+  // in the HTML and is shown only while actually playing, so the title
+  // screen stays clean and every gameplay shot carries the HUD.
+  showLive(): void {
+    this.show('hud-live');
+  }
+  hideLive(): void {
+    this.hide('hud-live');
+  }
+  showPause(): void {
+    this.show('pause-menu');
+  }
+  hidePause(): void {
+    this.hide('pause-menu');
+  }
+  showEnding(stats: string): void {
+    const e = this.el['ending-stats'];
+    if (e) e.textContent = stats;
+    this.show('ending-screen');
+  }
+  hideEnding(): void {
+    this.hide('ending-screen');
   }
 
-  setHealth(hp: number, armor: number): void {
-    this.healthFill.style.width = Math.max(0, Math.min(100, hp)) + '%';
-    this.armorFill.style.width = Math.max(0, Math.min(100, armor)) + '%';
+  toast(msg: string): void {
+    const e = this.el['toast'];
+    if (!e) return;
+    e.textContent = msg;
+    e.classList.remove('hidden');
+    e.classList.add('show');
+    if (this.toastTimer !== null) window.clearTimeout(this.toastTimer);
+    this.toastTimer = window.setTimeout(() => {
+      e.classList.remove('show');
+      e.classList.add('hidden');
+    }, 3200);
   }
 
-  setCash(cash: number): void {
-    this.cashEl.textContent = '$' + Math.floor(cash).toLocaleString('en-US');
+  subtitle(speaker: string, line: string): void {
+    const s = this.el['subtitle'];
+    const sp = this.el['subtitle-speaker'];
+    const ln = this.el['subtitle-line'];
+    if (!s || !sp || !ln) return;
+    sp.textContent = speaker;
+    ln.textContent = line;
+    s.classList.remove('hidden');
+    if (this.subtitleTimer !== null) window.clearTimeout(this.subtitleTimer);
+    this.subtitleTimer = window.setTimeout(() => s.classList.add('hidden'), 3400);
   }
-
-  setStars(n: number): void {
-    const stars = '★★★★★';
-    const filled = stars.slice(0, n);
-    const empty = stars.slice(n);
-    this.starsEl.innerHTML = '<span class="star-on">' + filled + '</span><span class="star-off">' + empty + '</span>';
-  }
-
-  setWeapon(name: string, clip: number, reserve: number, hasMag: boolean): void {
-    this.weaponEl.textContent = name;
-    this.ammoEl.textContent = hasMag ? clip + ' / ' + reserve : '';
-  }
-
-  setSpeed(mph: number, inVehicle: boolean, vehicleHpPct: number): void {
-    this.speedEl.style.display = inVehicle ? 'block' : 'none';
-    this.speedVal.textContent = inVehicle ? String(Math.round(mph)) : '';
-    this.vehicleRow.style.display = inVehicle ? 'flex' : 'none';
-    this.vehicleHpFill.style.width = Math.max(0, Math.min(100, vehicleHpPct)) + '%';
-  }
-
-  setDistrict(name: string): void {
-    if (this.districtEl.textContent !== name) {
-      this.districtEl.textContent = name;
-      this.districtEl.classList.remove('pop');
-      void this.districtEl.offsetWidth;
-      this.districtEl.classList.add('pop');
-    }
-  }
-
-  setRadio(station: RadioStation): void {
-    this.radioEl.textContent = station === 'wave' ? 'SOLMAR WAVE 104.5' : station === 'heat' ? 'DORADO HEAT 98.2' : 'RADIO OFF';
-  }
-
-  setObjective(text: string): void {
-    this.objectiveEl.textContent = text;
-    this.objectiveEl.style.display = text ? 'block' : 'none';
-  }
-
-  showSubtitle(speaker: string, text: string): void {
-    this.subtitleSpeaker.textContent = speaker;
-    this.subtitleText.textContent = text;
-    this.subtitleEl.classList.add('visible');
-  }
-
   clearSubtitle(): void {
-    this.subtitleEl.classList.remove('visible');
+    this.el['subtitle']?.classList.add('hidden');
   }
 
-  showPrompt(text: string): void {
-    this.promptEl.textContent = text;
-    this.promptEl.classList.add('visible');
+  letterbox(on: boolean): void {
+    this.el['letterbox-top']?.classList.toggle('on', on);
+    this.el['letterbox-bottom']?.classList.toggle('on', on);
   }
 
-  hidePrompt(): void {
-    this.promptEl.classList.remove('visible');
+  hitmarker(): void {
+    this.hitTimer = 0.25;
+    const h = this.el['hitmarker'];
+    if (h) h.classList.add('show');
   }
 
-  toast(text: string): void {
-    this.toastEl.textContent = text;
-    this.toastEl.classList.add('visible');
-    window.clearTimeout(this.toastTimer);
-    this.toastTimer = window.setTimeout(() => this.toastEl.classList.remove('visible'), 3200);
+  damage(): void {
+    this.damageFlash = 1;
   }
 
-  setDeadTitle(kind: 'WASTED' | 'BUSTED'): void {
-    const el = document.getElementById('dead-title');
-    if (el) el.textContent = kind;
+  setInteract(text: string | null): void {
+    const e = this.el['interact'];
+    if (!e) return;
+    if (text) {
+      e.textContent = text;
+      e.classList.remove('hidden');
+    } else {
+      e.classList.add('hidden');
+    }
   }
 
-  setCompleteStats(cash: number, timeMin: number): void {
-    const el = document.getElementById('complete-stats');
-    if (el) el.textContent = 'Cash earned: $' + Math.floor(cash).toLocaleString('en-US') + ' - Time: ' + timeMin + ' min - Solmar is yours.';
+  setVaultProgress(p: number | null): void {
+    const w = this.el['vault-wrap'];
+    const f = this.el['vault-fill'];
+    if (!w || !f) return;
+    if (p === null) {
+      w.classList.add('hidden');
+      return;
+    }
+    w.classList.remove('hidden');
+    f.style.width = `${Math.round(p * 100)}%`;
   }
 
-  setShopPrices(discount: boolean, armor: number, ammo: number, repair: number, respray: number): void {
-    const set = (id: string, v: number) => {
-      const el = document.getElementById(id);
-      if (el) el.textContent = '$' + v;
-    };
-    set('price-armor', armor);
-    set('price-ammo', ammo);
-    set('price-repair', repair);
-    set('price-respray', respray);
-    const note = document.getElementById('shop-note');
-    if (note) note.textContent = discount ? 'Story complete: 50% discount applied.' : 'Pay once, drive forever.';
+  showShop(title: string, items: { label: string; price: number; canAfford: boolean; onBuy: () => void }[]): void {
+    const panel = this.el['shop-panel'];
+    const t = this.el['shop-title'];
+    const list = this.el['shop-items'];
+    if (!panel || !t || !list) return;
+    t.textContent = title;
+    list.innerHTML = '';
+    for (const item of items) {
+      const row = document.createElement('div');
+      row.className = 'shop-row';
+      const label = document.createElement('span');
+      label.textContent = item.label;
+      const btn = document.createElement('button');
+      btn.className = 'shop-buy';
+      btn.textContent = `$${item.price}`;
+      btn.disabled = !item.canAfford;
+      btn.addEventListener('click', () => {
+        item.onBuy();
+        this.hide('shop-panel');
+      });
+      row.appendChild(label);
+      row.appendChild(btn);
+      list.appendChild(row);
+    }
+    panel.classList.remove('hidden');
   }
 
-  setContinueVisible(visible: boolean): void {
-    const el = document.getElementById('btn-continue');
-    if (el) el.style.display = visible ? 'block' : 'none';
+  hideShop(): void {
+    this.hide('shop-panel');
   }
 
-  setHudVisible(v: boolean): void {
-    const el = document.getElementById('hud-live');
-    if (el) el.style.display = v ? 'block' : 'none';
+  update(s: HudState, dt: number): void {
+    // stars
+    const starsEl = this.el['stars'];
+    if (starsEl) {
+      const spans = starsEl.children;
+      for (let i = 0; i < spans.length; i++) {
+        spans[i].classList.toggle('lit', i < s.stars);
+      }
+      starsEl.classList.toggle('hot', s.stars > 0);
+    }
+    const cash = this.el['cash'];
+    if (cash) cash.textContent = `$${s.cash.toLocaleString('en-US')}`;
+    const wn = this.el['weapon-name'];
+    if (wn) wn.textContent = s.weaponName;
+    const wa = this.el['weapon-ammo'];
+    if (wa) {
+      wa.textContent = s.clip === Infinity ? '∞' : `${s.clip} / ${s.reserve === Infinity ? '∞' : s.reserve}`;
+    }
+    const hf = this.el['health-fill'];
+    if (hf) hf.style.width = `${Math.max(0, Math.min(100, s.health))}%`;
+    const af = this.el['armor-fill'];
+    if (af) af.style.width = `${Math.max(0, Math.min(100, s.armor))}%`;
+    const sp = this.el['speed-num'];
+    if (sp) sp.textContent = s.inVehicle ? `${Math.round(s.speedMph)}` : '';
+    const sl = this.el['speed-label'];
+    if (sl) sl.textContent = s.inVehicle ? 'MPH' : '';
+    const vr = this.el['veh-hp-row'];
+    if (vr) vr.classList.toggle('hidden', !s.inVehicle);
+    const vf = this.el['veh-hp-fill'];
+    if (vf) vf.style.width = `${Math.max(0, Math.min(100, (s.vehHp / Math.max(1, s.vehHpMax)) * 100))}%`;
+    // district banner
+    if (s.district !== this.lastDistrict) {
+      this.lastDistrict = s.district;
+      this.districtTimer = 2.6;
+      const d = this.el['district'];
+      if (d) {
+        d.textContent = s.district;
+        d.classList.remove('hidden');
+        d.classList.add('show');
+      }
+    }
+    if (this.districtTimer > 0) {
+      this.districtTimer -= dt;
+      if (this.districtTimer <= 0) {
+        this.el['district']?.classList.add('hidden');
+        this.el['district']?.classList.remove('show');
+      }
+    }
+    // objective
+    const ot = this.el['objective-title'];
+    if (ot) ot.textContent = s.objectiveTitle;
+    const os = this.el['objective-step'];
+    if (os) os.textContent = s.objectiveStep;
+    const od = this.el['objective-dist'];
+    if (od) od.textContent = s.objectiveDist > 0 ? `${Math.round(s.objectiveDist)}m` : '';
+    // radio
+    const r = this.el['radio'];
+    if (r) r.textContent = s.radio;
+    // hitmarker decay
+    if (this.hitTimer > 0) {
+      this.hitTimer -= dt;
+      if (this.hitTimer <= 0) this.el['hitmarker']?.classList.remove('show');
+    }
+    // damage vignette decay
+    if (this.damageFlash > 0) {
+      this.damageFlash = Math.max(0, this.damageFlash - dt * 1.6);
+      const d = this.el['damage'];
+      if (d) d.style.opacity = `${this.damageFlash * 0.55}`;
+    }
   }
 
-  setLoading(done: boolean): void {
-    const el = document.getElementById('loading');
-    if (el) el.style.display = done ? 'none' : 'flex';
+  showWasted(): void {
+    const w = this.el['wasted'];
+    if (!w) return;
+    w.classList.remove('hidden');
+    window.setTimeout(() => w.classList.add('hidden'), 2200);
   }
 
-  setLoadingText(text: string): void {
-    const el = document.getElementById('loading-text');
-    if (el) el.textContent = text;
+  radioName(i: number): string {
+    return RADIO[i]?.name ?? '';
   }
 }

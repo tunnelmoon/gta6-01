@@ -1,162 +1,158 @@
-// Traffic: 25-35 lane-following AI cars on the road graph. They pick random
-// destinations, brake for obstacles ahead, and panic near gunfire. Right
-// hand traffic, lane offset 3.5m.
-import * as THREE from 'three';
-import { clamp } from './config.js';
-import { City } from './city.js';
+// Lane-following traffic: 25-35 AI cars on the road graph that brake for
+// obstacles, panic near gunfire, and stay near the player.
+import { City, GraphNode } from './city.js';
 import { Rng } from './rng.js';
-import { Vehicle, makeVehicle } from './vehicles.js';
+import { TRAFFIC_MODELS, clamp } from './config.js';
+import { DriveInput, Vehicle } from './vehicles.js';
 
-export interface Obstacle {
-  pos: THREE.Vector3;
-  radius: number;
+export interface TrafficEvents {
+  gunfireAt: { x: number; z: number; time: number } | null;
+}
+
+export class TrafficCar {
+  vehicle: Vehicle;
+  target: GraphNode;
+  cruise: number;
+  stuckTimer = 0;
+  reverseTimer = 0;
+  panicUntil = 0;
+
+  constructor(vehicle: Vehicle, target: GraphNode, cruise: number) {
+    this.vehicle = vehicle;
+    this.target = target;
+    this.cruise = cruise;
+  }
 }
 
 export class Traffic {
-  cars: Vehicle[] = [];
-  private routes = new Map<Vehicle, { x: number; z: number }[]>();
-  private speeds = new Map<Vehicle, number>();
-  private panics = new Map<Vehicle, number>();
-  private scene: THREE.Scene;
-  private city: City;
+  cars: TrafficCar[] = [];
   private rng: Rng;
-  private targetCount = 30;
+  private time = 0;
 
-  constructor(scene: THREE.Scene, city: City, seed: number) {
-    this.scene = scene;
-    this.city = city;
+  constructor(private city: City, seed = 7) {
     this.rng = new Rng(seed);
   }
 
-  setCount(n: number): void {
-    this.targetCount = n;
+  spawnNear(px: number, pz: number, count: number): void {
+    while (this.cars.length < count) {
+      const node = this.randomNodeNear(px, pz, 60, 280);
+      const spec = this.rng.pick(TRAFFIC_MODELS);
+      const v = new Vehicle(spec);
+      v.place(node.x + this.rng.range(-3, 3), node.z + this.rng.range(-3, 3), this.rng.range(0, Math.PI * 2));
+      const next = this.pickNext(node, v.heading);
+      const car = new TrafficCar(v, next, this.rng.range(9, 14));
+      this.cars.push(car);
+    }
   }
 
-  private randomDef(): string {
-    const r = this.rng.next();
-    if (r < 0.55) return 'urbanSedan';
-    if (r < 0.8) return 'v8Dorado';
-    if (r < 0.92) return 'solmarGT';
-    return 'cargoMule';
+  private randomNodeNear(px: number, pz: number, minD: number, maxD: number): GraphNode {
+    const nodes = this.city.graph;
+    for (let tries = 0; tries < 40; tries++) {
+      const n = nodes[this.rng.int(0, nodes.length - 1)];
+      const d = Math.hypot(n.x - px, n.z - pz);
+      if (d >= minD && d <= maxD) return n;
+    }
+    return this.city.nearestNode(px, pz);
   }
 
-  spawnCar(x: number, z: number, heading: number): Vehicle {
-    const car = makeVehicle(this.randomDef(), this.scene, this.rng);
-    car.ai = true;
-    car.place(x, z, heading);
-    const node = this.city.nearestNode(x, z);
-    this.routes.set(car, this.newRoute(node.x, node.z));
-    this.speeds.set(car, this.rng.range(9, 15));
-    this.panics.set(car, 0);
-    this.cars.push(car);
-    return car;
+  private pickNext(node: GraphNode, heading: number): GraphNode {
+    const options = node.links.map((i) => this.city.graph[i]);
+    if (options.length === 0) return node;
+    // prefer the link most aligned with current heading, with some variety
+    let best = options[0];
+    let bestScore = -Infinity;
+    for (const o of options) {
+      const ang = Math.atan2(o.x - node.x, o.z - node.z);
+      let d = ang - heading;
+      while (d > Math.PI) d -= Math.PI * 2;
+      while (d < -Math.PI) d += Math.PI * 2;
+      const score = -Math.abs(d) + this.rng.range(0, 0.9);
+      if (score > bestScore) {
+        bestScore = score;
+        best = o;
+      }
+    }
+    return best;
   }
 
-  private newRoute(x: number, z: number): { x: number; z: number }[] {
-    const nodes = Array.from(this.city.nodes.values());
-    const dest = nodes[Math.floor(this.rng.next() * nodes.length)];
-    const path = this.city.route(x, z, dest.x, dest.z);
-    return path.length > 1 ? path : [{ x: dest.x, z: dest.z }];
-  }
-
-  panicNear(x: number, z: number, radius: number): void {
+  update(dt: number, px: number, pz: number, events: TrafficEvents, playerVehicle: Vehicle | null, peds: { x: number; z: number }[]): void {
+    this.time += dt;
+    // keep the fleet near the player
     for (const car of this.cars) {
-      const dx = car.pos.x - x;
-      const dz = car.pos.z - z;
-      if (dx * dx + dz * dz < radius * radius) {
-        this.panics.set(car, 4 + this.rng.next() * 3);
-        this.speeds.set(car, this.rng.range(16, 22));
+      const v = car.vehicle;
+      const dPlayer = Math.hypot(v.x - px, v.z - pz);
+      if (dPlayer > 380) {
+        const node = this.randomNodeNear(px, pz, 60, 220);
+        v.place(node.x, node.z, this.rng.range(0, Math.PI * 2));
+        car.target = this.pickNext(node, v.heading);
+        continue;
       }
-    }
-  }
-
-  update(dt: number, playerPos: THREE.Vector3, obstacles: Obstacle[]): void {
-    // Keep the count topped up near the player.
-    if (this.cars.length < this.targetCount) {
-      const nodes = Array.from(this.city.nodes.values());
-      for (let tries = 0; tries < 8 && this.cars.length < this.targetCount; tries++) {
-        const n = nodes[Math.floor(this.rng.next() * nodes.length)];
-        const dx = n.x - playerPos.x;
-        const dz = n.z - playerPos.z;
-        const d2 = dx * dx + dz * dz;
-        if (d2 > 60 * 60 && d2 < 320 * 320) {
-          this.spawnCar(n.x, n.z, this.rng.range(0, Math.PI * 2));
+      // panic near gunfire
+      if (events.gunfireAt && this.time - events.gunfireAt.time < 3) {
+        const gd = Math.hypot(v.x - events.gunfireAt.x, v.z - events.gunfireAt.z);
+        if (gd < 45) car.panicUntil = this.time + 3;
+      }
+      const panicking = this.time < car.panicUntil;
+      // arrived at the target node: pick the next one
+      const td = Math.hypot(car.target.x - v.x, car.target.z - v.z);
+      if (td < 7) {
+        const node = this.city.nearestNode(v.x, v.z);
+        car.target = this.pickNext(node, v.heading);
+      }
+      // steer toward the target node
+      const wantHeading = Math.atan2(car.target.x - v.x, car.target.z - v.z);
+      let dh = wantHeading - v.heading;
+      while (dh > Math.PI) dh -= Math.PI * 2;
+      while (dh < -Math.PI) dh += Math.PI * 2;
+      const steer = clamp(dh * 1.6, -1, 1);
+      // brake for obstacles ahead: the player car, other traffic, peds
+      let throttle = v.forwardSpeed < (panicking ? 20 : car.cruise) ? 1 : 0;
+      const aheadX = v.x + Math.sin(v.heading) * 11;
+      const aheadZ = v.z + Math.cos(v.heading) * 11;
+      let blocked = false;
+      if (playerVehicle && Math.hypot(playerVehicle.x - aheadX, playerVehicle.z - aheadZ) < 5) blocked = true;
+      if (!blocked) {
+        for (const o of this.cars) {
+          if (o === car) continue;
+          if (Math.hypot(o.vehicle.x - aheadX, o.vehicle.z - aheadZ) < 5.5) {
+            blocked = true;
+            break;
+          }
         }
       }
-    }
-    for (let i = this.cars.length - 1; i >= 0; i--) {
-      const car = this.cars[i];
-      const dx = car.pos.x - playerPos.x;
-      const dz = car.pos.z - playerPos.z;
-      if (dx * dx + dz * dz > 420 * 420) {
-        this.removeCar(i);
-        continue;
-      }
-      if (car.exploded) {
-        this.removeCar(i);
-        continue;
-      }
-      const route = this.routes.get(car)!;
-      let wp = route[0];
-      if (!wp) {
-        this.routes.set(car, this.newRoute(car.pos.x, car.pos.z));
-        wp = this.routes.get(car)![0];
-      }
-      // Lane offset: right side of the travel direction.
-      const toX = wp.x - car.pos.x;
-      const toZ = wp.z - car.pos.z;
-      const dist = Math.hypot(toX, toZ);
-      if (dist < 6) {
-        route.shift();
-        if (route.length === 0) this.routes.set(car, this.newRoute(car.pos.x, car.pos.z));
-        continue;
-      }
-      const dirAngle = Math.atan2(toX, toZ);
-      const rightX = Math.cos(dirAngle);
-      const rightZ = -Math.sin(dirAngle);
-      const tx = wp.x + rightX * 3.5;
-      const tz = wp.z + rightZ * 3.5;
-      const wantAngle = Math.atan2(tx - car.pos.x, tz - car.pos.z);
-      let diff = wantAngle - car.heading;
-      while (diff > Math.PI) diff -= Math.PI * 2;
-      while (diff < -Math.PI) diff += Math.PI * 2;
-      const panic = (this.panics.get(car) ?? 0) > 0;
-      if (panic) this.panics.set(car, (this.panics.get(car) ?? 0) - dt);
-      // Brake for obstacles ahead.
-      let throttle = 1;
-      const fwd = car.forward;
-      for (const o of obstacles) {
-        const ox = o.pos.x - car.pos.x;
-        const oz = o.pos.z - car.pos.z;
-        const along = ox * fwd.x + oz * fwd.z;
-        const side = Math.abs(ox * fwd.z - oz * fwd.x);
-        if (along > 0 && along < (panic ? 8 : 16) && side < 3.2 + o.radius) {
-          throttle = -1;
-          break;
+      if (!blocked) {
+        for (const p of peds) {
+          if (Math.hypot(p.x - aheadX, p.z - aheadZ) < 3.5) {
+            blocked = true;
+            break;
+          }
         }
       }
-      const targetSpeed = panic ? (this.speeds.get(car) ?? 18) : (this.speeds.get(car) ?? 12);
-      if (Math.abs(diff) > 0.7) throttle = Math.min(throttle, 0.3);
-      if (car.speed > targetSpeed) throttle = -0.4;
-      car.update(dt, { throttle, steer: clamp(diff * 1.6, -1, 1), drift: false, horn: false }, this.city);
+      if (blocked) throttle = -0.4;
+      // stuck detection: reverse briefly
+      if (Math.abs(v.forwardSpeed) < 0.6 && throttle > 0) {
+        car.stuckTimer += dt;
+        if (car.stuckTimer > 3) {
+          car.reverseTimer = 1.2;
+          car.stuckTimer = 0;
+        }
+      } else {
+        car.stuckTimer = 0;
+      }
+      let input: DriveInput;
+      if (car.reverseTimer > 0) {
+        car.reverseTimer -= dt;
+        input = { throttle: -0.7, steer: -steer, drift: false, brake: false };
+      } else {
+        input = { throttle, steer, drift: false, brake: blocked };
+      }
+      const others = this.cars.map((c) => c.vehicle);
+      if (playerVehicle) others.push(playerVehicle);
+      v.update(dt, input, this.city, others);
     }
   }
 
-  private removeCar(i: number): void {
-    const car = this.cars[i];
-    this.routes.delete(car);
-    this.speeds.delete(car);
-    this.panics.delete(car);
-    car.dispose(this.scene);
-    this.cars.splice(i, 1);
-  }
-
-  removeCarByVehicle(v: Vehicle): void {
-    const i = this.cars.indexOf(v);
-    if (i >= 0) this.removeCar(i);
-  }
-
-  clear(): void {
-    for (let i = this.cars.length - 1; i >= 0; i--) this.removeCar(i);
+  addToScene(scene: import('three').Scene): void {
+    for (const c of this.cars) scene.add(c.vehicle.group);
   }
 }

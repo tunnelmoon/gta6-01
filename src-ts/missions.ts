@@ -1,605 +1,599 @@
-// Story missions: 4 chained missions with letterboxed cutscenes, dialogue
-// subtitles, GPS waypoints, fail/retry and rewards. Each mission is a list
-// of typed steps; the manager spawns what a step needs and advances when
-// its condition is met. Deliver radii are set above the closest distance
-// any car can physically reach a building centre.
-import * as THREE from 'three';
-import { City, TimeOfDay } from './city.js';
-import { LOC } from './config.js';
-import { Enemy } from './combat.js';
+// Story missions: chained objectives, cutscenes, dialogue, rewards,
+// fail/retry, shops, and localStorage saves.
+import { City } from './city.js';
+import { MISSIONS, MissionDef, PLACES, SHOPS } from './config.js';
+import { Combat, Enemy } from './combat.js';
+import { Player } from './player.js';
 import { Vehicle } from './vehicles.js';
 
-export interface CutsceneLine {
-  speaker: string;
-  text: string;
-}
-
-export interface CutsceneDef {
-  duration: number;
-  camFrom: THREE.Vector3;
-  camTo: THREE.Vector3;
-  lookFrom: THREE.Vector3;
-  lookTo: THREE.Vector3;
-  lines: CutsceneLine[];
-}
-
-export type StepKind = 'goto' | 'kill' | 'steal' | 'deliver' | 'grab' | 'rescue' | 'respray' | 'breach' | 'escape' | 'convoy' | 'gate';
-
-export interface StepDef {
-  kind: StepKind;
+export interface CutsceneKey {
   x: number;
+  y: number;
   z: number;
-  radius: number;
-  text: string;
-  hp?: number;
-  count?: number;
-  positions?: { x: number; z: number }[];
-  vehicleDef?: string;
-  vehicleHp?: number;
-  minHpPct?: number;
-  faction?: 'syndicate' | 'swat' | 'guard';
+  lx: number;
+  ly: number;
+  lz: number;
+  t: number; // seconds from start
+}
+export interface SubtitleLine {
+  speaker: string;
+  line: string;
+  start: number;
+  end: number;
 }
 
-export interface MissionDef {
-  id: string;
-  title: string;
-  startX: number;
-  startZ: number;
-  intro: CutsceneDef;
-  outro: CutsceneDef;
-  steps: StepDef[];
-  reward: number;
-  rewardText: string;
+export interface MissionEvents {
+  toast: (msg: string) => void;
+  objective: (title: string, step: string, dist: number) => void;
+  subtitle: (speaker: string, line: string) => void;
+  clearSubtitle: () => void;
+  letterbox: (on: boolean) => void;
+  cameraKeys: (keys: CutsceneKey[], onDone: () => void) => void;
+  onMissionComplete: (id: number, reward: number) => void;
+  onStoryComplete: () => void;
+  onFail: (reason: string) => void;
+  onVaultCracked: () => void;
+  onRemoveVehicles: (vs: Vehicle[]) => void;
+  save: () => void;
 }
 
-export interface MissionContext {
-  city: City;
-  playerPos(): THREE.Vector3;
-  playerVehicle(): Vehicle | null;
-  playerInVehicle(): boolean;
-  spawnVehicle(defId: string, x: number, z: number, heading: number): Vehicle;
-  removeVehicle(v: Vehicle): void;
-  spawnEnemy(x: number, z: number, hp: number, faction: 'syndicate' | 'swat' | 'guard'): Enemy;
-  addHeat(n: number): void;
-  setHeat(n: number): void;
-  giveCash(n: number): void;
-  unlockWeapon(id: string): void;
-  setArmor(n: number): void;
-  healPlayer(): void;
-  setTimeOfDay(m: TimeOfDay): void;
-  playCutscene(cut: CutsceneDef, onDone: () => void): void;
-  showSubtitle(speaker: string, text: string): void;
-  clearSubtitle(): void;
-  notify(text: string): void;
-  onMissionComplete(mission: MissionDef): void;
-  onMissionFailed(reason: string): void;
-  isPlayerSeen(): boolean;
-  isKeyDown(k: string): boolean;
-  openCompoundGate(): void;
-  setWantedBlockade(): void;
+interface StepRuntime {
+  kills: number;
+  targetVehicle: Vehicle | null;
+  convoy: { van: Vehicle; escorts: Vehicle[]; waypoints: { x: number; z: number }[]; wpIndex: number; disabled: number; failed: boolean } | null;
+  interactProgress: number;
+  guards: Enemy[];
+  // where the convoy van stopped (the rescue point survives the convoy step)
+  rescueAt: { x: number; z: number } | null;
 }
-
-const V3 = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z);
-
-export const MISSIONS: MissionDef[] = [
-  {
-    id: 'm1',
-    title: 'Salt and Ignition',
-    startX: LOC.elFaroBar.x,
-    startZ: LOC.elFaroBar.z + 25,
-    intro: {
-      duration: 8,
-      camFrom: V3(-560, 14, 40), camTo: V3(-520, 6, 110),
-      lookFrom: V3(-540, 8, 80), lookTo: V3(-540, 4, 80),
-      lines: [
-        { speaker: 'Mateo', text: 'Two years off the grid, Mara, and Vespera Syndicate still remembers what your brother owed them. Tonight, they collect, unless we pay first.' },
-        { speaker: 'Mara', text: "I don't boost cars for free anymore, Mateo. Give me a name and a plate." },
-        { speaker: 'Mateo', text: 'Take my Kestrel. Silver Solmar GT parked at the Playa Dorado VIP lot. Clean keys, dirty owner. Drop it at Voss Customs before SMPD tags the plates.' },
-      ],
-    },
-    outro: {
-      duration: 5,
-      camFrom: V3(-440, 8, -110), camTo: V3(-480, 5, -160),
-      lookFrom: V3(-460, 3, -140), lookTo: V3(-460, 3, -140),
-      lines: [
-        { speaker: 'Mateo', text: 'Clean work, Voss. Vespera will not take this quietly, keep that Kestrel close.' },
-      ],
-    },
-    steps: [
-      { kind: 'goto', x: LOC.vipLot.x, z: LOC.vipLot.z, radius: 14, text: 'Reach the Playa Dorado VIP lot' },
-      { kind: 'kill', x: 640, z: -185, radius: 30, text: 'Take out the 3 lot guards', hp: 60, count: 3, positions: [{ x: 632, z: -175 }, { x: 652, z: -180 }, { x: 640, z: -195 }], faction: 'guard' },
-      { kind: 'steal', x: 645, z: -185, radius: 6, text: 'Steal the silver Solmar GT', vehicleDef: 'solmarGT' },
-      { kind: 'deliver', x: LOC.vossCustoms.x, z: LOC.vossCustoms.z, radius: 17, text: 'Lose the heat and deliver the GT to Voss Customs', minHpPct: 40 },
-    ],
-    reward: 1500,
-    rewardText: '$1,500 + Kestrel 9mm + Voss Customs unlocked',
-  },
-  {
-    id: 'm2',
-    title: 'Harbor Static',
-    startX: LOC.vossCustoms.x,
-    startZ: LOC.vossCustoms.z + 25,
-    intro: {
-      duration: 8,
-      camFrom: V3(-60, 30, 420), camTo: V3(40, 18, 520),
-      lookFrom: V3(60, 20, 560), lookTo: V3(180, 16, 660),
-      lines: [
-        { speaker: 'Mateo', text: "Mara, we got burned! Vespera tracked the coupe's transponder and raided my stash at Puerto Viejo docks." },
-        { speaker: 'Mara', text: "Tell me they didn't get the ledger drives." },
-        { speaker: 'Mateo', text: 'Locked inside Pier 4 warehouse right now. Grab that drive before their freighter leaves port, and watch out, they brought heavy hardware.' },
-      ],
-    },
-    outro: {
-      duration: 6,
-      camFrom: V3(500, 8, 110), camTo: V3(545, 5, 165),
-      lookFrom: V3(520, 3, 140), lookTo: V3(520, 3, 140),
-      lines: [
-        { speaker: 'Mara', text: "I've got the drives, Mateo. Meet me at the motel, wait... Mateo? Answer your phone." },
-      ],
-    },
-    steps: [
-      { kind: 'goto', x: LOC.portGate.x, z: LOC.portGate.z, radius: 14, text: 'Drive to the Port Main Gate' },
-      { kind: 'kill', x: 190, z: 680, radius: 60, text: 'Clear the 8 Syndicate gunmen', hp: 85, count: 8, positions: [{ x: 140, z: 620 }, { x: 165, z: 640 }, { x: 190, z: 680 }, { x: 210, z: 665 }, { x: 235, z: 725 }, { x: 150, z: 700 }, { x: 225, z: 640 }, { x: 175, z: 720 }], faction: 'syndicate' },
-      { kind: 'grab', x: LOC.pier4.x, z: LOC.pier4.z - 12, radius: 6, text: 'Grab the Encrypted Ledger Case in Pier 4' },
-      { kind: 'steal', x: 215, z: 755, radius: 6, text: 'Hijack the armored Cargo Mule', vehicleDef: 'cargoMule', vehicleHp: 200 },
-      { kind: 'deliver', x: LOC.safehouseMotel.x, z: LOC.safehouseMotel.z, radius: 17, text: 'Deliver the van to the Safehouse Motel', minHpPct: 0 },
-    ],
-    reward: 3500,
-    rewardText: '$3,500 + Viper Micro-SMG + Solmar Armory unlocked',
-  },
-  {
-    id: 'm3',
-    title: 'Neon Ransom',
-    startX: LOC.safehouseMotel.x,
-    startZ: LOC.safehouseMotel.z + 25,
-    intro: {
-      duration: 8,
-      camFrom: V3(500, 10, 110), camTo: V3(540, 6, 160),
-      lookFrom: V3(520, 4, 140), lookTo: V3(520, 4, 140),
-      lines: [
-        { speaker: 'Vespera Lieutenant', text: "You want your little hacker back, Voss? Bring the ledger to Cayo Verde midnight, or we dump him off the North Bridge." },
-        { speaker: 'Mara', text: "They're moving him up Central Avenue right now. If they cross that bridge into Cayo Verde, he's dead." },
-      ],
-    },
-    outro: {
-      duration: 6,
-      camFrom: V3(-440, 8, -110), camTo: V3(-480, 5, -160),
-      lookFrom: V3(-460, 3, -140), lookTo: V3(-460, 3, -140),
-      lines: [
-        { speaker: 'Mateo', text: 'I cracked the ledger while tied up in the back of that van... fifty grand in bearer bonds sitting in their Cayo Verde penthouse vault.' },
-        { speaker: 'Mara', text: 'No more running. Tonight, we take Solmar.' },
-      ],
-    },
-    steps: [
-      { kind: 'convoy', x: -150, z: -80, radius: 40, text: 'Intercept the convoy heading north' },
-      { kind: 'rescue', x: 0, z: -300, radius: 8, text: 'Rescue Mateo from the stopped Transport Van' },
-      { kind: 'respray', x: LOC.vossCustoms.x, z: LOC.vossCustoms.z, radius: 15, text: 'Lose the 3-star heat: respray at Voss Customs out of police sight' },
-    ],
-    reward: 7500,
-    rewardText: '$7,500 + Bulldog Carbine + max Body Armor',
-  },
-  {
-    id: 'm4',
-    title: 'Solmar Sunset',
-    startX: LOC.bridgeSouth.x,
-    startZ: LOC.bridgeSouth.z,
-    intro: {
-      duration: 9,
-      camFrom: V3(-80, 24, -340), camTo: V3(60, 16, -460),
-      lookFrom: V3(0, 8, -470), lookTo: V3(0, 6, -520),
-      lines: [
-        { speaker: 'Mateo', text: 'I looped their penthouse security cameras for ten minutes. Once you breach the courtyard, their private army will lock down the bridge.' },
-        { speaker: 'Mara', text: "Keep the boat engine running at Playa Dorado Marina. When I cross back over that bridge, I'm not coming empty-handed." },
-      ],
-    },
-    outro: {
-      duration: 12,
-      camFrom: V3(720, 14, 200), camTo: V3(790, 6, 280),
-      lookFrom: V3(780, 3, 260), lookTo: V3(780, 3, 260),
-      lines: [
-        { speaker: 'Mara', text: 'The debt is paid, Mateo. And the rest of Solmar? It is wide open.' },
-      ],
-    },
-    steps: [
-      { kind: 'goto', x: 0, z: -510, radius: 12, text: 'Cross the Coastal Bridge into Cayo Verde' },
-      { kind: 'gate', x: LOC.compoundGate.x, z: LOC.compoundGate.z, radius: 10, text: 'Breach the Vespera Compound Gate' },
-      { kind: 'kill', x: 120, z: -780, radius: 55, text: 'Defeat the 12 elite guards and the Underboss', hp: 110, count: 12, positions: [{ x: 100, z: -760 }, { x: 140, z: -760 }, { x: 110, z: -740 }, { x: 130, z: -745 }, { x: 95, z: -780 }, { x: 145, z: -780 }, { x: 105, z: -800 }, { x: 135, z: -800 }, { x: 120, z: -770 }, { x: 100, z: -730 }, { x: 140, z: -735 }, { x: 120, z: -790 }], faction: 'syndicate' },
-      { kind: 'breach', x: LOC.vault.x, z: LOC.vault.z, radius: 6, text: 'Breach the Vault (hold E for 3s)' },
-      { kind: 'escape', x: LOC.marina.x, z: LOC.marina.z, radius: 17, text: 'Take the getaway GT and reach Playa Dorado Marina' },
-    ],
-    reward: 50000,
-    rewardText: '$50,000 + Endless Free Roam + 50% store discount',
-  },
-];
 
 export class Missions {
-  current = -1;
-  active = false;
+  missionIndex = -1; // -1 = free roam / no mission
+  stepIndex = 0;
   storyComplete = false;
-  customsUnlocked = false;
-  armoryUnlocked = false;
   discount = false;
-  objective = '';
-  waypoint: { x: number; z: number; radius: number } | null = null;
-  private ctx: MissionContext;
-  private stepIndex = 0;
-  private stepDone = false;
-  private killRemaining = 0;
-  private missionEnemyIds = new Set<number>();
-  private convoy: { vehicles: Vehicle[]; route: { x: number; z: number }[]; wp: number; speed: number; stopped: boolean } | null = null;
-  private convoyFailed = false;
-  private chasers: Vehicle[] = [];
-  private chasersSpawned = false;
-  private breachT = 0;
-  private stepVehicle: Vehicle | null = null;
-  private outroPlaying = false;
-  private underboss: Enemy | null = null;
-  private underbossSpawned = false;
+  private runtime: StepRuntime = { kills: 0, targetVehicle: null, convoy: null, interactProgress: 0, guards: [], rescueAt: null };
+  private cutsceneActive = false;
+  private missionCars: Vehicle[] = [];
+  private spawnCarFn: ((key: string, x: number, z: number, heading: number, color?: number) => Vehicle) | null = null;
 
-  constructor(ctx: MissionContext) {
-    this.ctx = ctx;
+  constructor(
+    private city: City,
+    private scene: import('three').Scene,
+    private combat: Combat,
+    private events: MissionEvents,
+  ) {}
+
+  setSpawnCar(fn: (key: string, x: number, z: number, heading: number, color?: number) => Vehicle): void {
+    this.spawnCarFn = fn;
   }
 
-  get def(): MissionDef | null {
-    return this.current >= 0 ? MISSIONS[this.current] : null;
+  private spawnCar(key: string, x: number, z: number, heading: number, color?: number): Vehicle {
+    if (!this.spawnCarFn) throw new Error('spawnCar not set');
+    return this.spawnCarFn(key, x, z, heading, color);
   }
 
-  get step(): StepDef | null {
-    const d = this.def;
-    if (!d || this.stepIndex >= d.steps.length) return null;
-    return d.steps[this.stepIndex];
+  get current(): MissionDef | null {
+    return this.missionIndex >= 0 && this.missionIndex < MISSIONS.length ? MISSIONS[this.missionIndex] : null;
   }
 
-  nextMissionIndex(): number {
-    return this.current + 1;
+  get stepText(): string {
+    const m = this.current;
+    if (!m) return '';
+    return m.steps[this.stepIndex]?.text ?? '';
   }
 
-  canStartNext(): boolean {
-    return !this.active && !this.storyComplete && this.current + 1 < MISSIONS.length;
-  }
-
-  nextStartRing(): { x: number; z: number; title: string } | null {
-    if (!this.canStartNext()) return null;
-    const d = MISSIONS[this.current + 1];
-    return { x: d.startX, z: d.startZ, title: d.title };
-  }
-
-  startMission(i: number): void {
-    const d = MISSIONS[i];
-    this.current = i;
+  startMission(id: number, player: Player): void {
+    this.missionIndex = id - 1;
     this.stepIndex = 0;
-    this.active = true;
-    this.stepDone = false;
-    this.killRemaining = 0;
-    this.missionEnemyIds.clear();
-    this.convoy = null;
-    this.convoyFailed = false;
-    this.chasers = [];
-    this.chasersSpawned = false;
-    this.breachT = 0;
-    this.stepVehicle = null;
-    this.outroPlaying = false;
-    this.underboss = null;
-    this.underbossSpawned = false;
-    if (i === 2) this.ctx.setTimeOfDay('night');
-    if (i === 3) this.ctx.setTimeOfDay('sunset');
-    if (i === 0) this.ctx.unlockWeapon('kestrel');
-    // A new job starts patched up: health has no other recovery path, and
-    // a player who limps out of the last job at 20 HP would have no chance
-    // against the next crew.
-    this.ctx.healPlayer();
-    this.ctx.playCutscene(d.intro, () => this.beginSteps());
+    this.clearRescueAt();
+    this.resetRuntime();
+    const m = this.current;
+    if (!m) return;
+    player.place(m.start.x + 4, m.start.z + 4, Math.PI);
+    this.setupStep(player);
+    this.playIntro(m);
   }
 
-  // Debug/shot driver: jump straight to a mission step.
-  debugJumpToStep(i: number): void {
-    if (!this.def) return;
-    this.stepIndex = Math.min(i, this.def.steps.length - 1);
-    this.setupStep();
-  }
-
-  private beginSteps(): void {
-    this.stepIndex = 0;
-    this.setupStep();
-  }
-
-  private setupStep(): void {
-    const s = this.step;
-    if (!s) {
-      this.completeMission();
-      return;
-    }
-    this.stepDone = false;
-    this.objective = s.text;
-    this.waypoint = { x: s.x, z: s.z, radius: s.radius };
-    if (s.kind === 'kill' && s.positions) {
-      this.killRemaining = s.count ?? s.positions.length;
-      this.missionEnemyIds.clear();
-      for (const p of s.positions) {
-        const e = this.ctx.spawnEnemy(p.x, p.z, s.hp ?? 80, s.faction ?? 'syndicate');
-        this.missionEnemyIds.add(e.id);
-      }
-      if (this.def?.id === 'm4' && !this.underbossSpawned) {
-        this.underbossSpawned = true;
-        this.underboss = this.ctx.spawnEnemy(120, -780, 250, 'syndicate');
-        this.missionEnemyIds.add(this.underboss.id);
-        this.killRemaining += 1;
+  private resetRuntime(): void {
+    // Step-scoped state is wiped between steps. The stolen target
+    // vehicle is the exception: advance() saves and restores it, so a
+    // deliver step can still check it. Mission boundaries (startMission,
+    // failMission) call this without restoring, which clears it.
+    for (const e of this.runtime.guards) {
+      if (e.state !== 'dead') {
+        e.hp = 0;
+        e.state = 'dead';
+        e.deadTimer = 0;
       }
     }
-    if (s.kind === 'steal' && s.vehicleDef) {
-      const v = this.ctx.spawnVehicle(s.vehicleDef, s.x, s.z, 0);
-      if (s.vehicleHp) v.hp = s.vehicleHp;
-      this.stepVehicle = v;
-    }
-    if (s.kind === 'convoy') {
-      const route = [
-        { x: -160, z: -80 }, { x: -160, z: -240 }, { x: -160, z: -400 },
-        { x: -80, z: -400 }, { x: 0, z: -400 }, { x: 0, z: -470 }, { x: 0, z: -540 },
-      ];
-      const escorts = [
-        this.ctx.spawnVehicle('v8Dorado', -150, -70, Math.PI),
-        this.ctx.spawnVehicle('v8Dorado', -150, -92, Math.PI),
-      ];
-      const van = this.ctx.spawnVehicle('cargoMule', -150, -80, Math.PI);
-      van.hp = 220;
-      this.convoy = { vehicles: [escorts[0], van, escorts[1]], route, wp: 0, speed: 18.8, stopped: false };
-      this.ctx.addHeat(0);
-    }
-    if (s.kind === 'deliver' && this.def?.id === 'm1') {
-      this.ctx.setHeat(40);
-    }
-    if (s.kind === 'respray') {
-      this.ctx.setHeat(50);
-    }
-    if (s.kind === 'escape') {
-      this.ctx.setHeat(80);
-      this.ctx.setWantedBlockade();
-      const gt = this.ctx.spawnVehicle('solmarGT', 95, -750, Math.PI / 2);
-      this.stepVehicle = gt;
-    }
-    if (s.kind === 'gate') {
-      this.ctx.notify('Breach the gate: get close and press E');
-    }
-    if (s.kind === 'rescue' && this.convoy) {
-      const van = this.convoy.vehicles[1];
-      this.waypoint = { x: van.pos.x, z: van.pos.z, radius: 8 };
-    }
+    // rescueAt survives: the convoy van's stop point is the rescue target
+    // for the next step, even after the convoy step itself is cleared
+    const rescueAt = this.runtime.rescueAt;
+    this.runtime = { kills: 0, targetVehicle: null, convoy: null, interactProgress: 0, guards: [], rescueAt };
   }
 
-  private advance(): void {
-    this.stepIndex++;
-    this.setupStep();
+  private clearRescueAt(): void {
+    this.runtime.rescueAt = null;
   }
 
-  private completeMission(): void {
-    const d = this.def!;
-    this.active = false;
-    this.objective = '';
-    this.waypoint = null;
-    this.ctx.giveCash(d.reward);
-    if (d.id === 'm1') {
-      this.ctx.unlockWeapon('kestrel');
-      this.customsUnlocked = true;
+  private clearMissionCars(): void {
+    if (this.missionCars.length > 0) {
+      this.events.onRemoveVehicles([...this.missionCars]);
     }
-    if (d.id === 'm2') {
-      this.ctx.unlockWeapon('viper');
-      this.armoryUnlocked = true;
+    this.missionCars = [];
+  }
+
+  // Build the entities for the current step.
+  setupStep(player: Player): void {
+    const m = this.current;
+    if (!m) return;
+    const step = m.steps[this.stepIndex];
+    if (!step) return;
+    if (step.kind === 'kill') {
+      const count = step.count ?? 1;
+      const hp = step.hp ?? 60;
+      const faction = m.id === 4 ? (count === 1 && step.text.includes('Underboss') ? 'underboss' : 'elite') : m.id === 2 ? 'syndicate' : 'guard';
+      // spread guards around the step target
+      for (let i = 0; i < count; i++) {
+        const a = (i / count) * Math.PI * 2 + 0.7;
+        const r = 8 + (i % 3) * 5;
+        const e = this.combat.spawnEnemy(step.x + Math.sin(a) * r, step.z + Math.cos(a) * r, hp, faction);
+        this.runtime.guards.push(e);
+      }
+      // explosive barrels near the fight for M2/M4
+      if (m.id === 2 || m.id === 4) {
+        this.combat.spawnBarrel(step.x - 12, step.z + 6);
+        this.combat.spawnBarrel(step.x + 10, step.z - 8);
+      }
     }
-    if (d.id === 'm3') {
-      this.ctx.unlockWeapon('bulldog');
-      this.ctx.setArmor(100);
+    if (step.kind === 'steal') {
+      const key = m.id === 1 ? 'solmarGT' : 'cargoMule';
+      const color = m.id === 1 ? 0xc0c8d0 : 0x4a4a48;
+      const v = this.spawnCar(key, step.x, step.z, Math.PI / 2, color);
+      v.hp = m.id === 2 ? 200 : 100;
+      this.runtime.targetVehicle = v;
+      this.missionCars.push(v);
     }
-    if (d.id === 'm4') {
-      this.storyComplete = true;
-      this.discount = true;
+    if (step.kind === 'convoy') {
+      const waypoints = [
+        { x: -150, z: -80 },
+        { x: -120, z: -80 },
+        { x: -120, z: -360 },
+        { x: 0, z: -360 },
+        { x: 0, z: -430 },
+        { x: 0, z: -510 },
+      ];
+      const van = this.spawnCar('cargoMule', -150, -86, 0, 0x141414);
+      const e1 = this.spawnCar('v8Dorado', -156, -80, 0, 0x8a2a20);
+      const e2 = this.spawnCar('v8Dorado', -144, -80, 0, 0x8a2a20);
+      e1.hp = 140;
+      e2.hp = 140;
+      van.hp = 300;
+      this.runtime.convoy = { van, escorts: [e1, e2], waypoints, wpIndex: 0, disabled: 0, failed: false };
+      this.missionCars.push(van, e1, e2);
     }
-    this.ctx.onMissionComplete(d);
-    this.outroPlaying = true;
-    this.ctx.playCutscene(d.outro, () => {
-      this.outroPlaying = false;
+    if (step.kind === 'interact' && m.id === 4) {
+      // getaway car waits at the compound
+      const v = this.spawnCar('solmarGT', 95, -750, Math.PI, 0xc0c8d0);
+      this.missionCars.push(v);
+    }
+    this.updateObjective(player);
+  }
+
+  private playIntro(m: MissionDef): void {
+    const keys: CutsceneKey[] = [];
+    const start = m.start;
+    if (m.id === 1) {
+      keys.push(
+        { x: -540, y: 26, z: 120, lx: -540, ly: 10, lz: 80, t: 0 },
+        { x: -520, y: 8, z: 100, lx: -540, ly: 3, lz: 80, t: 4 },
+        { x: -536, y: 3.2, z: 102, lx: -540, ly: 2.5, lz: 90, t: 8 },
+      );
+    } else if (m.id === 2) {
+      keys.push(
+        { x: -452, y: 4, z: -128, lx: -460, ly: 1.6, lz: -140, t: 0 },
+        { x: -200, y: 60, z: 200, lx: -60, ly: 20, lz: 480, t: 4 },
+        { x: -40, y: 30, z: 420, lx: 180, ly: 10, lz: 660, t: 8 },
+      );
+    } else if (m.id === 3) {
+      keys.push(
+        { x: 512, y: 4, z: 128, lx: 520, ly: 1.6, lz: 140, t: 0 },
+        { x: 300, y: 40, z: -40, lx: -120, ly: 2, lz: -160, t: 4 },
+        { x: -100, y: 12, z: -140, lx: -120, ly: 2, lz: -280, t: 8 },
+      );
+    } else {
+      keys.push(
+        { x: -60, y: 34, z: -380, lx: 0, ly: 4, lz: -470, t: 0 },
+        { x: 40, y: 18, z: -460, lx: 120, ly: 6, lz: -720, t: 4.5 },
+        { x: 110, y: 6, z: -700, lx: 120, ly: 2, lz: -780, t: 9 },
+      );
+    }
+    this.cutsceneActive = true;
+    this.events.letterbox(true);
+    this.showSubtitles(m.intro);
+    this.events.cameraKeys(keys, () => {
+      this.cutsceneActive = false;
+      this.events.letterbox(false);
+      this.events.clearSubtitle();
     });
   }
 
-  fail(reason: string): void {
-    if (!this.active) return;
-    this.active = false;
-    this.objective = '';
-    this.waypoint = null;
-    for (const c of this.chasers) this.ctx.removeVehicle(c);
-    this.chasers = [];
-    if (this.stepVehicle) {
-      this.ctx.removeVehicle(this.stepVehicle);
-      this.stepVehicle = null;
-    }
-    if (this.convoy) {
-      for (const v of this.convoy.vehicles) this.ctx.removeVehicle(v);
-      this.convoy = null;
-    }
-    this.ctx.onMissionFailed(reason);
+  private showSubtitles(lines: { speaker: string; line: string }[]): void {
+    // subtitles are queued by the game loop via the cutscene timer; store
+    // them on the instance for the game to read
+    this.subtitleQueue = lines.map((l, i) => ({ ...l, start: i * 3.2, end: i * 3.2 + 3.0 }));
   }
 
-  onEnemyKilled(e: Enemy): void {
-    if (!this.active || !this.missionEnemyIds.has(e.id)) return;
-    this.missionEnemyIds.delete(e.id);
-    this.killRemaining--;
-    if (this.killRemaining <= 0) {
-      const s = this.step;
-      if (s && s.kind === 'kill') this.advance();
+  subtitleQueue: SubtitleLine[] = [];
+
+  isCutscene(): boolean {
+    return this.cutsceneActive;
+  }
+
+  skipCutscene(): void {
+    if (!this.cutsceneActive) return;
+    this.cutsceneActive = false;
+    this.events.letterbox(false);
+    this.events.clearSubtitle();
+    this.subtitleQueue = [];
+  }
+
+  // Mission kill hook: count kills toward the current kill step.
+  onKill(_e: Enemy): void {
+    const m = this.current;
+    if (!m) return;
+    const step = m.steps[this.stepIndex];
+    if (step && step.kind === 'kill') {
+      this.runtime.kills += 1;
     }
   }
 
-  onPlayerDeath(): void {
-    if (this.active) this.fail('Mara was wasted. Mission failed, try again.');
-  }
-
-  onPlayerBusted(): void {
-    if (this.active) this.fail('Mara was busted. Mission failed, try again.');
-  }
-
-  // E pressed: context actions for grab / rescue / breach / gate steps.
-  interact(): boolean {
-    const s = this.step;
-    if (!this.active || !s) return false;
-    const p = this.ctx.playerPos();
-    const d = Math.hypot(p.x - s.x, p.z - s.z);
-    if (s.kind === 'grab' && d < s.radius + 2) {
-      this.ctx.notify('Ledger Case secured');
-      this.advance();
-      return true;
+  // Called when the player enters a vehicle.
+  onEnterVehicle(v: Vehicle, player: Player): void {
+    const m = this.current;
+    if (!m) return;
+    const step = m.steps[this.stepIndex];
+    if (step && step.kind === 'steal' && this.runtime.targetVehicle === v) {
+      this.advance(player);
     }
-    if (s.kind === 'rescue' && this.convoy && this.convoy.stopped) {
-      const van = this.convoy.vehicles[1];
-      const vd = Math.hypot(p.x - van.pos.x, p.z - van.pos.z);
-      if (vd < 5) {
-        this.ctx.notify('Mateo rescued');
-        this.advance();
+  }
+
+  // Called when the customs respray clears the wanted level.
+  onCustomsClear(player: Player): void {
+    const m = this.current;
+    if (!m) return;
+    const step = m.steps[this.stepIndex];
+    if (step && step.kind === 'deliver' && m.id === 3) {
+      this.advance(player);
+    }
+  }
+
+  // Interact key (E/F) near an interact target.
+  tryInteract(player: Player, dt: number): boolean {
+    const m = this.current;
+    if (!m) return false;
+    const step = m.steps[this.stepIndex];
+    if (!step || step.kind !== 'interact') return false;
+    // the rescue target follows the stopped van
+    let tx = step.x;
+    let tz = step.z;
+    if (m.id === 3) {
+      const at = this.runtime.rescueAt ?? (this.runtime.convoy ? { x: this.runtime.convoy.van.x, z: this.runtime.convoy.van.z } : null);
+      if (at) {
+        tx = at.x;
+        tz = at.z;
+      }
+    }
+    const px = player.inVehicle ? player.inVehicle.x : player.x;
+    const pz = player.inVehicle ? player.inVehicle.z : player.z;
+    const d = Math.hypot(tx - px, tz - pz);
+    if (d > step.radius) return false;
+    if (m.id === 4) {
+      // vault: hold for 3 seconds
+      this.runtime.interactProgress += dt;
+      if (this.runtime.interactProgress >= 3) {
+        this.runtime.interactProgress = 0;
+        this.advance(player);
         return true;
       }
+      return true; // holding
     }
-    if (s.kind === 'gate' && d < s.radius + 2) {
-      this.ctx.openCompoundGate();
-      this.ctx.notify('Compound gate breached');
-      this.advance();
-      return true;
-    }
-    return false;
+    this.advance(player);
+    return true;
   }
 
-  update(dt: number): void {
-    if (!this.active || this.outroPlaying) return;
-    const s = this.step;
-    if (!s) return;
-    const p = this.ctx.playerPos();
-    const pv = this.ctx.playerVehicle();
-    const dist = Math.hypot(p.x - s.x, p.z - s.z);
-
-    if (s.kind === 'goto' && dist < s.radius) {
-      this.advance();
-      return;
-    }
-    if (s.kind === 'steal' && pv && this.stepVehicle && pv === this.stepVehicle) {
-      this.advance();
-      return;
-    }
-    if (s.kind === 'deliver') {
-      if (pv && this.stepVehicle && pv === this.stepVehicle && dist < s.radius) {
-        const pct = (pv.hp / pv.def.hp) * 100;
-        if (s.minHpPct && pct < s.minHpPct) {
-          this.fail('The delivery car is too damaged. Mission failed.');
-          return;
-        }
-        this.advance();
-        return;
-      }
-    }
-    if (s.kind === 'breach') {
-      if (dist < s.radius + 2 && this.ctx.playerInVehicle() === false && this.ctx.isKeyDown('e')) {
-        this.breachT += dt;
-        if (this.breachT >= 3) {
-          this.ctx.notify('Vault cracked: $50,000 in bearer bonds');
-          this.advance();
-          return;
-        }
-      } else {
-        this.breachT = 0;
-      }
-    }
-    if (s.kind === 'respray') {
-      if (pv && dist < s.radius && !this.ctx.isPlayerSeen()) {
-        this.ctx.setHeat(0);
-        pv.hp = pv.def.hp;
-        this.ctx.notify('Respray complete. Heat cleared, car repaired.');
-        this.advance();
-        return;
-      }
-    }
-    if (s.kind === 'escape' && pv && this.stepVehicle && pv === this.stepVehicle && dist < s.radius) {
-      this.advance();
-      return;
-    }
-    if (s.kind === 'convoy' && this.convoy) {
-      this.updateConvoy(dt);
-      return;
-    }
-    // M2 chasers: two V8 Dorados tail the player after the hijack.
-    if (this.def?.id === 'm2' && this.step?.kind === 'deliver' && !this.chasersSpawned && pv) {
-      this.chasersSpawned = true;
-      const c1 = this.ctx.spawnVehicle('v8Dorado', 40, 520, 0);
-      const c2 = this.ctx.spawnVehicle('v8Dorado', 60, 540, 0);
-      this.chasers = [c1, c2];
-    }
-    for (const c of this.chasers) {
-      if (c.exploded) continue;
-      const tx = p.x - c.pos.x;
-      const tz = p.z - c.pos.z;
-      const want = Math.atan2(tx, tz);
-      let diff = want - c.heading;
-      while (diff > Math.PI) diff -= Math.PI * 2;
-      while (diff < -Math.PI) diff += Math.PI * 2;
-      c.update(dt, { throttle: 1, steer: Math.max(-1, Math.min(1, diff * 2)), drift: false, horn: false }, this.ctx.city);
-      const d = Math.hypot(tx, tz);
-      if (pv && d < c.radius + pv.radius) {
-        pv.damage(8 * dt);
-        c.damage(4 * dt);
-      }
-    }
-    this.chasers = this.chasers.filter((c) => !c.exploded);
+  getInteractProgress(): number {
+    return this.runtime.interactProgress / 3;
   }
 
-  private updateConvoy(dt: number): void {
-    const cv = this.convoy!;
-    const escorts = [cv.vehicles[0], cv.vehicles[2]];
-    const van = cv.vehicles[1];
-    // Fail if the convoy crosses into Cayo Verde with escorts alive.
-    if (!this.convoyFailed && van.pos.z < -510) {
-      const alive = escorts.filter((e) => !e.exploded && e.hp > e.def.hp * 0.2);
-      if (alive.length > 0) {
-        this.convoyFailed = true;
-        this.fail('The convoy crossed the bridge. Mateo is gone.');
-        return;
+  failMission(reason: string, player: Player): void {
+    this.events.onFail(reason);
+    this.combat.clearEnemies();
+    // eject the player from a mission car before it is removed
+    if (player.inVehicle && this.missionCars.includes(player.inVehicle)) {
+      player.exitVehicle();
+    }
+    this.clearMissionCars();
+    this.clearRescueAt();
+    this.resetRuntime();
+    this.stepIndex = 0;
+    const m = this.current;
+    if (m) {
+      player.place(m.start.x + 4, m.start.z + 4, Math.PI);
+      this.setupStep(player);
+    }
+  }
+
+  // Public read of the convoy van position (minimap GPS target).
+  convoyVanPos(): { x: number; z: number } | null {
+    const c = this.runtime.convoy;
+    if (c) return { x: c.van.x, z: c.van.z };
+    // Once the convoy step is cleared, the convoy record is gone, but
+    // the van's stop point is kept in rescueAt for the rescue step.
+    // Return it so the GPS and the rescue interact still point at the
+    // van instead of falling back to the step coordinates.
+    return this.runtime.rescueAt;
+  }
+
+  // Expose the convoy escorts for the playtest/debug hooks.
+  convoyEscorts(): Vehicle[] {
+    const c = this.runtime.convoy;
+    return c ? c.escorts : [];
+  }
+
+  private advance(player: Player): void {
+    const m = this.current;
+    if (!m) return;
+    const finishedStep = m.steps[this.stepIndex];
+    // The stolen target vehicle must survive the step reset: the
+    // deliver step that follows the steal step checks it. Without this,
+    // the deliver can never complete (targetVehicle is wiped here).
+    const keepVehicle = this.runtime.targetVehicle;
+    this.stepIndex += 1;
+    this.resetRuntime();
+    this.runtime.targetVehicle = keepVehicle;
+    // cracking the vault triggers the 4-star escape
+    if (m.id === 4 && finishedStep && finishedStep.kind === 'interact') {
+      this.events.onVaultCracked();
+    }
+    if (this.stepIndex >= m.steps.length) {
+      this.completeMission(player);
+      return;
+    }
+    // set up the next step's entities (guards, target vehicle, convoy)
+    this.setupStep(player);
+    this.updateObjective(player);
+    this.events.toast(`Objective updated: ${m.steps[this.stepIndex].text}`);
+  }
+
+  private completeMission(player: Player): void {
+    const m = this.current;
+    if (!m) return;
+    player.cash += m.reward;
+    if (m.id === 1) player.unlockWeapon(2);
+    if (m.id === 2) player.unlockWeapon(3);
+    if (m.id === 3) {
+      player.unlockWeapon(4);
+      player.armor = 100;
+    }
+    this.events.onMissionComplete(m.id, m.reward);
+    if (m.id === 4) {
+      this.storyComplete = true;
+      this.discount = true;
+      this.missionIndex = -1;
+      this.events.onStoryComplete();
+      // Save AFTER storyComplete is set, so the auto-save records the
+      // finished story; saving before it left a stale story=false save
+      // that made Continue drop the player back into M4.
+      this.events.save();
+      return;
+    }
+    this.events.save();
+    // chain into the next mission
+    this.missionIndex += 1;
+    this.stepIndex = 0;
+    const next = this.current;
+    if (next) {
+      this.setupStep(player);
+      this.playIntro(next);
+    }
+  }
+
+  private updateObjective(player: Player): void {
+    const m = this.current;
+    if (!m) return;
+    const step = m.steps[this.stepIndex];
+    if (!step) return;
+    const px = player.inVehicle ? player.inVehicle.x : player.x;
+    const pz = player.inVehicle ? player.inVehicle.z : player.z;
+    const d = Math.hypot(step.x - px, step.z - pz);
+    this.events.objective(`${m.title} - ${m.id} of 4`, step.text, d);
+  }
+
+  update(dt: number, player: Player): void {
+    const m = this.current;
+    if (!m || this.cutsceneActive) return;
+    const step = m.steps[this.stepIndex];
+    if (!step) return;
+    const px = player.inVehicle ? player.inVehicle.x : player.x;
+    const pz = player.inVehicle ? player.inVehicle.z : player.z;
+    if (step.kind === 'goto') {
+      const d = Math.hypot(step.x - px, step.z - pz);
+      this.events.objective(`${m.title} - ${m.id} of 4`, step.text, d);
+      if (d < step.radius) this.advance(player);
+    } else if (step.kind === 'kill') {
+      const need = step.count ?? 1;
+      this.events.objective(`${m.title} - ${m.id} of 4`, `${step.text} (${Math.min(this.runtime.kills, need)}/${need})`, Math.hypot(step.x - px, step.z - pz));
+      if (this.runtime.kills >= need) this.advance(player);
+    } else if (step.kind === 'deliver') {
+      const d = Math.hypot(step.x - px, step.z - pz);
+      this.events.objective(`${m.title} - ${m.id} of 4`, step.text, d);
+      if (d < step.radius) {
+        if (m.id === 1) {
+          // must be in the stolen GT with at least 40% HP
+          const v = player.inVehicle;
+          if (v && this.runtime.targetVehicle === v && v.hp >= v.spec.hp * 0.4) {
+            this.advance(player);
+          } else if (v && this.runtime.targetVehicle === v) {
+            this.failMission('The GT is too damaged to deliver. Voss Customs will not take it.', player);
+          }
+        } else if (m.id === 2) {
+          const v = player.inVehicle;
+          if (v && this.runtime.targetVehicle === v) this.advance(player);
+        } else if (m.id === 3) {
+          // respray step: arriving at Voss Customs in a car completes it
+          // (the customs clear itself is a bonus that fires when needed)
+          const v = player.inVehicle;
+          if (v) this.advance(player);
+        } else if (m.id === 4) {
+          this.advance(player);
+        }
+      }
+    } else if (step.kind === 'convoy') {
+      this.updateConvoy(dt, player);
+      const c = this.runtime.convoy;
+      if (c) {
+        this.events.objective(`${m.title} - ${m.id} of 4`, `${step.text} (escorts disabled ${c.disabled}/2)`, Math.hypot(c.van.x - px, c.van.z - pz));
+      }
+    } else if (step.kind === 'interact') {
+      let tx = step.x;
+      let tz = step.z;
+      if (m.id === 3) {
+        const at = this.runtime.rescueAt ?? (this.runtime.convoy ? { x: this.runtime.convoy.van.x, z: this.runtime.convoy.van.z } : null);
+        if (at) {
+          tx = at.x;
+          tz = at.z;
+        }
+      }
+      this.events.objective(`${m.title} - ${m.id} of 4`, step.text, Math.hypot(tx - px, tz - pz));
+    }
+  }
+
+  private updateConvoy(dt: number, player: Player): void {
+    const c = this.runtime.convoy;
+    if (!c) return;
+    if (c.failed) return;
+    const disabledCount = c.escorts.filter((e) => e.hp < e.spec.hp * 0.2 || e.dead).length;
+    c.disabled = disabledCount;
+    const vanStopped = disabledCount >= 2;
+    // van crossed the bridge: Mateo is gone
+    if (c.van.z < -510 && !vanStopped) {
+      c.failed = true;
+      this.failMission('The convoy crossed the bridge. Mateo is gone.', player);
+      return;
+    }
+    // move the convoy along its waypoints at 42 MPH (18.8 m/s)
+    const speed = 18.8;
+    const moveCar = (v: Vehicle, tx: number, tz: number, cruise: number) => {
+      if (v.dead) return;
+      const want = Math.atan2(tx - v.x, tz - v.z);
+      let dh = want - v.heading;
+      while (dh > Math.PI) dh -= Math.PI * 2;
+      while (dh < -Math.PI) dh += Math.PI * 2;
+      const steer = Math.max(-1, Math.min(1, dh * 1.8));
+      const throttle = v.forwardSpeed < cruise ? 1 : 0;
+      v.update(dt, { throttle, steer, drift: false, brake: false }, this.city, [c.van, ...c.escorts]);
+    };
+    const wp = c.waypoints[c.wpIndex];
+    if (!vanStopped) {
+      // advance waypoint when the van gets close
+      if (Math.hypot(wp.x - c.van.x, wp.z - c.van.z) < 10 && c.wpIndex < c.waypoints.length - 1) {
+        c.wpIndex += 1;
+      }
+      const cur = c.waypoints[c.wpIndex];
+      moveCar(c.van, cur.x, cur.z, speed);
+      // escorts flank the van
+      const ex = Math.cos(c.van.heading);
+      const ez = -Math.sin(c.van.heading);
+      c.escorts.forEach((e, i) => {
+        const side = i === 0 ? -1 : 1;
+        const tx = c.van.x + ex * side * 5 - Math.sin(c.van.heading) * 4;
+        const tz = c.van.z + ez * side * 5 - Math.cos(c.van.heading) * 4;
+        if (e.hp < e.spec.hp * 0.2 || e.dead) {
+          // disabled escort stops
+          e.update(dt, { throttle: 0, steer: 0, drift: false, brake: true }, this.city, [c.van, ...c.escorts]);
+        } else {
+          moveCar(e, tx, tz, speed);
+        }
+      });
+    } else {
+      // both escorts down: the van stops
+      c.van.update(dt, { throttle: 0, steer: 0, drift: false, brake: true }, this.city, c.escorts);
+      for (const e of c.escorts) {
+        e.update(dt, { throttle: 0, steer: 0, drift: false, brake: true }, this.city, [c.van, ...c.escorts]);
+      }
+      // remember where the van stopped: that is the rescue point
+      this.runtime.rescueAt = { x: c.van.x, z: c.van.z };
+      // van stopped: move to the rescue step
+      if (this.current && this.current.steps[this.stepIndex].kind === 'convoy') {
+        this.advance(player);
       }
     }
-    // Escorts disabled (hp below 20%) and van stopped -> rescue step.
-    const disabled = escorts.every((e) => e.exploded || e.hp <= e.def.hp * 0.2);
-    if (disabled && !cv.stopped) {
-      cv.stopped = true;
-      van.speed = 0;
-      this.ctx.notify('Convoy stopped. Rescue Mateo from the Transport Van.');
-      this.advance();
+  }
+
+  // Shops: armory (weapons/ammo/armor), customs (repair/respray), motel (save).
+  nearestShop(px: number, pz: number): { id: string; name: string; x: number; z: number; radius: number; kind: string } | null {
+    for (const s of SHOPS) {
+      if (Math.hypot(s.x - px, s.z - pz) < s.radius + 4) return s;
     }
-    if (cv.stopped) {
-      // Rescue step is handled by interact(); keep the waypoint on the van.
-      return;
+    return null;
+  }
+
+  // Save/load. Corrupt or missing saves are ignored safely.
+  saveGame(player: Player): string {
+    const data = {
+      v: 1,
+      cash: player.cash,
+      mission: this.missionIndex,
+      step: this.stepIndex,
+      armor: player.armor,
+      health: player.health,
+      x: player.x,
+      z: player.z,
+      story: this.storyComplete,
+      weapons: player.weapons.map((w) => w.spec.unlock),
+    };
+    try {
+      localStorage.setItem('solmar-save-v1', JSON.stringify(data));
+    } catch {
+      // storage unavailable (private mode); ignore
     }
-    const target = cv.route[cv.wp];
-    if (!target) return;
-    const dx = target.x - van.pos.x;
-    const dz = target.z - van.pos.z;
-    const dist = Math.hypot(dx, dz);
-    if (dist < 6) {
-      cv.wp++;
-      return;
+    return JSON.stringify(data);
+  }
+
+  loadGame(player: Player): boolean {
+    let raw: string | null = null;
+    try {
+      raw = localStorage.getItem('solmar-save-v1');
+    } catch {
+      return false;
     }
-    const want = Math.atan2(dx, dz);
-    const speed = cv.speed;
-    for (let i = 0; i < cv.vehicles.length; i++) {
-      const v = cv.vehicles[i];
-      if (v.exploded) continue;
-      // Follow in formation: escorts flank the van.
-      const offX = i === 0 ? -4 : i === 2 ? 4 : 0;
-      const offZ = i === 1 ? 0 : 2;
-      const tx = target.x + offX - v.pos.x;
-      const tz = target.z + offZ - v.pos.z;
-      const wang = Math.atan2(tx, tz);
-      let diff = wang - v.heading;
-      while (diff > Math.PI) diff -= Math.PI * 2;
-      while (diff < -Math.PI) diff += Math.PI * 2;
-      v.speed = speed;
-      v.heading += diff * dt * 1.2;
-      v.pos.x += Math.sin(v.heading) * v.speed * dt;
-      v.pos.z += Math.cos(v.heading) * v.speed * dt;
-      v.group.position.copy(v.pos);
-      v.group.rotation.y = v.heading;
+    if (!raw) return false;
+    let data: Record<string, unknown>;
+    try {
+      data = JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      return false;
     }
+    if (typeof data !== 'object' || data === null || data.v !== 1) return false;
+    if (typeof data.cash === 'number') player.cash = data.cash;
+    if (typeof data.armor === 'number') player.armor = data.armor;
+    if (typeof data.health === 'number') player.health = data.health;
+    if (typeof data.x === 'number' && typeof data.z === 'number') player.place(data.x, data.z, 0);
+    if (typeof data.story === 'boolean') {
+      this.storyComplete = data.story;
+      this.discount = data.story;
+    }
+    if (Array.isArray(data.weapons)) {
+      data.weapons.forEach((u, i) => {
+        if (u === 0 && player.weapons[i]) player.weapons[i].spec.unlock = 0;
+      });
+    }
+    if (typeof data.mission === 'number' && data.mission >= 0) {
+      this.missionIndex = data.mission;
+      this.stepIndex = typeof data.step === 'number' ? data.step : 0;
+    }
+    return true;
   }
 }
