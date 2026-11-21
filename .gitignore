@@ -1,3 +1,5 @@
 node_modules/
+test-build/
 out/
+*.log
 .DS_Store

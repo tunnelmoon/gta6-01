@@ -4,42 +4,27 @@
 
 # Solmar Sunset
 
-An open-world crime game in the spirit of GTA 6, built for the [make.fun GTA 6 bounty](https://make.fun/bounty/gta6-01). Referral: https://make.fun/r/jg1vyr82
+An open-world crime game set in Solmar, a sun-baked coastal city in the spirit of GTA 6. You play Mara Voss, a driver pulled back into the life she left behind, running four chained missions across five districts before the sun sets on the Vespera Syndicate.
 
-You are Mara Voss, a former getaway driver pulled back into Solmar by a debt her brother left with the Vespera Syndicate. Four jobs stand between her and a clean slate: boost a silver Solmar GT, steal back a ledger from the docks, rescue her friend Mateo from a moving convoy, and crack the Vespera penthouse vault at sunset.
+Entry for the make.fun bounty: https://make.fun/bounty/gta6-01
 
-## The city
+Built with an AI agent on make.fun: https://make.fun/r/jg1vyr82
 
-Solmar is a sun-soaked coastal city of five districts: Centro Solmar downtown, Playa Dorado beachfront, Barrio Cobre in the west, the Puerto Viejo port, and Cayo Verde island across the Coastal Bridge. The city is fully drivable and walkable, with traffic, pedestrians, shops, police, and a day, sunset, and night cycle.
+## Play it
 
-## How to play
+Open `game/index.html` in a desktop browser. No install, no network, no server. Everything runs offline from the files in this repo.
 
-Serve the game folder with any static server (`node serve.ts`, then open http://localhost:8080) and play in a desktop browser. No network is needed: every mesh, texture, and sound is generated at runtime, and the only library is a vendored Three.js build.
+## The game
 
-- **W A S D** move and drive, **Shift** sprint, **Space** drift
-- **Mouse** look, **right click** aim, **left click** fire or punch
-- **E / F** enter and exit cars, interact with objectives and shops
-- **R** reload, **1 2 3 4** switch weapons, **Tab** change radio station
-- **M** full city map, **Esc** pause, **Enter** skip cutscene
+- Five districts: Centro Solmar, Playa Dorado, Barrio Cobre, Puerto Viejo, and Cayo Verde.
+- Four chained missions: steal the Solmar GT, recover the ledger from the docks, rescue Mateo from a moving convoy, and take down the Vespera underboss at the Cayo Verde vault.
+- On-foot and driving play, car stealing, traffic and pedestrians, a 1 to 5 star wanted system with police pursuit, combat with four weapons, shops for armor, ammo, respray, and repair, radio, and a save system.
+- HUD with a live minimap, health and armor bars, cash, wanted stars, weapon and ammo, and the current mission objective.
 
-## Systems
+## Controls
 
-- **Vehicles**: 7 classes from the Solmar GT sports coupe to the SWAT Tactical Enforcer, with arcade handling, drift, damage states, smoke, fire, and explosions. Steal any parked or traffic car.
-- **Wanted level**: 1 to 5 stars. Police cruisers pursue, interceptors join at 3 stars, SWAT at 4. Break line of sight outside police vision cones (shown on the minimap) to cool down, or respray at Voss Customs to clear the heat.
-- **Combat**: 4 weapons (fists, Kestrel 9mm, Viper Micro-SMG with drive-by, Bulldog Carbine), cover-seeking enemies, tracers, muzzle flash, and hit feedback.
-- **Missions**: 4 chained story jobs with letterboxed cutscenes, dialogue, GPS waypoints, and rewards, ending in Endless Free Roam with a 50% store discount.
-- **Economy**: earn cash from jobs and dropped wallets, spend it on armor, ammo, repairs, and resprays at Voss Customs and the Solmar Armory.
-- **Audio**: engine hum, tire skid, sirens, gunshots, explosions, and two synthesized radio stations (Solmar Wave 104.5 synthwave, Dorado Heat 98.2 latin-funk), all made live with the Web Audio API.
+- WASD to walk and drive, mouse to aim, E to enter or exit a car and to interact, Space for the handbrake, R to reload, 1 to 4 to switch weapon, Tab to change radio station, Esc to pause.
 
-## Files
+## Build
 
-- `game/index.html` - page, HUD, menus, import map for Three.js
-- `game/src/` - compiled ES modules, one file per system (config, city, player, vehicles, traffic, pedestrians, police, combat, missions, hud, minimap, render, audio, textures, input, rng, shots, main)
-- `game/vendor/three.module.min.js` - vendored Three.js
-- `src-ts/` - the TypeScript sources; `npm run build` type-checks, emits to `game/src/`, and audits the shipped game for offline safety
-- `scripts/` - screenshot driver (`shots.mjs`) and end-to-end playtest (`playtest.mjs`)
-- `screenshots/` - 4 real renders of the game
-
-## Tech notes
-
-TypeScript compiled with `tsc` to plain ES modules (no bundler in the shipped output). All textures are painted on offscreen canvases at runtime. All audio is synthesized. The game runs 100% offline and was playtested end to end in headless Chromium: title to New Game to all four missions to story complete, with zero console errors.
+The game is written in TypeScript under `src-ts/` and compiled to plain ES modules in `game/src/`. Three.js is vendored under `game/vendor/`. Run `npm run build` to typecheck, compile, copy the vendor files, and audit the output for offline use.
