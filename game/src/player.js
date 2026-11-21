@@ -1,240 +1,260 @@
-// Mara Voss: articulated 3D character mesh (leather bomber jacket, dark
-// jeans, boots) with procedural walk, sprint, aim, shoot and melee
-// animation. Movement is camera-relative, with building collision and
-// shoreline blocking.
+// Mara Voss: articulated character mesh, on-foot movement, enter/exit,
+// health and armor, weapon inventory.
 import * as THREE from 'three';
-import { PLAYER, angleLerp, clamp, lerp } from './config.js';
+import { ECONOMY, PLAYER_TUNE, WEAPONS, clamp, isWater } from './config.js';
+function limbMat(color) {
+    return new THREE.MeshStandardMaterial({ color, roughness: 0.85 });
+}
+export function buildMaraMesh() {
+    const group = new THREE.Group();
+    const jacket = limbMat(0x5a2a22); // leather bomber jacket, oxblood
+    const jeans = limbMat(0x2a3444);
+    const skin = limbMat(0xc89878);
+    const boots = limbMat(0x1c1a18);
+    const hair = limbMat(0x14100c);
+    // legs pivot at the hip (y 0.95)
+    const mkLeg = (sx) => {
+        const pivot = new THREE.Group();
+        pivot.position.set(sx * 0.16, 0.95, 0);
+        const leg = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.85, 0.22), jeans);
+        leg.position.y = -0.42;
+        leg.castShadow = true;
+        pivot.add(leg);
+        const boot = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.14, 0.34), boots);
+        boot.position.set(0, -0.88, 0.05);
+        pivot.add(boot);
+        group.add(pivot);
+        return pivot;
+    };
+    const legL = mkLeg(-1);
+    const legR = mkLeg(1);
+    // torso
+    const torso = new THREE.Mesh(new THREE.BoxGeometry(0.56, 0.62, 0.3), jacket);
+    torso.position.y = 1.28;
+    torso.castShadow = true;
+    group.add(torso);
+    // jacket collar + belt
+    const collar = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.1, 0.32), limbMat(0x3a1a14));
+    collar.position.y = 1.62;
+    group.add(collar);
+    // head
+    const head = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.32, 0.3), skin);
+    head.position.y = 1.78;
+    head.castShadow = true;
+    group.add(head);
+    const hairM = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.2, 0.34), hair);
+    hairM.position.set(0, 1.94, -0.03);
+    group.add(hairM);
+    const ponytail = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.42, 0.12), hair);
+    ponytail.position.set(0, 1.72, -0.22);
+    group.add(ponytail);
+    // arms pivot at the shoulder (y 1.52)
+    const mkArm = (sx) => {
+        const pivot = new THREE.Group();
+        pivot.position.set(sx * 0.34, 1.52, 0);
+        const arm = new THREE.Mesh(new THREE.BoxGeometry(0.17, 0.62, 0.19), jacket);
+        arm.position.y = -0.3;
+        arm.castShadow = true;
+        pivot.add(arm);
+        const hand = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.12, 0.14), skin);
+        hand.position.y = -0.64;
+        pivot.add(hand);
+        group.add(pivot);
+        return pivot;
+    };
+    const armL = mkArm(-1);
+    const armR = mkArm(1);
+    return { group, armL, armR, legL, legR, torso };
+}
 export class Player {
+    group;
+    armL;
+    armR;
+    legL;
+    legR;
+    x = -540;
+    z = 80;
+    heading = 0;
+    vx = 0;
+    vz = 0;
+    health = PLAYER_TUNE.health;
+    armor = 0;
+    cash = ECONOMY.startCash;
+    inVehicle = null;
+    weapons = [];
+    weaponIndex = 0;
+    walkPhase = 0;
+    aimBlend = 0;
+    dead = false;
     constructor(scene) {
-        this.group = new THREE.Group();
-        this.pos = new THREE.Vector3(0, 0, 40);
-        this.heading = Math.PI;
-        this.speed = 0;
-        this.state = 'foot';
-        this.health = PLAYER.maxHealth;
-        this.armor = 0;
-        this.cash = 250;
-        this.aiming = false;
-        this.firing = false;
-        this.meleeTimer = 0;
-        this.walkPhase = 0;
-        this.weaponMeshes = new Map();
-        this.muzzleZ = new Map();
-        this.currentWeapon = 'melee';
-        const jacket = new THREE.MeshStandardMaterial({ color: 0x5a3a28, roughness: 0.7 });
-        const jeans = new THREE.MeshStandardMaterial({ color: 0x2c3542, roughness: 0.85 });
-        const skin = new THREE.MeshStandardMaterial({ color: 0xd9a077, roughness: 0.7 });
-        const hair = new THREE.MeshStandardMaterial({ color: 0x1c1410, roughness: 0.6 });
-        const boot = new THREE.MeshStandardMaterial({ color: 0x241a12, roughness: 0.6 });
-        const mkBox = (w, h, d, mat) => {
-            const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
-            m.castShadow = true;
-            return m;
-        };
-        // Torso group at hip height; limbs pivot from their top.
-        this.torso = new THREE.Group();
-        this.torso.position.y = 1.05;
-        const chest = mkBox(0.52, 0.62, 0.3, jacket);
-        chest.position.y = 0.31;
-        this.torso.add(chest);
-        const collar = mkBox(0.4, 0.08, 0.32, new THREE.MeshStandardMaterial({ color: 0x3a2618, roughness: 0.7 }));
-        collar.position.y = 0.64;
-        this.torso.add(collar);
-        this.head = new THREE.Group();
-        this.head.position.y = 0.72;
-        const skull = mkBox(0.26, 0.28, 0.26, skin);
-        skull.position.y = 0.14;
-        this.head.add(skull);
-        const hairTop = mkBox(0.28, 0.1, 0.28, hair);
-        hairTop.position.y = 0.3;
-        this.head.add(hairTop);
-        const hairBack = mkBox(0.28, 0.24, 0.08, hair);
-        hairBack.position.set(0, 0.16, -0.12);
-        this.head.add(hairBack);
-        this.torso.add(this.head);
-        const mkArm = (side) => {
-            const arm = new THREE.Group();
-            arm.position.set(0.31 * side, 0.58, 0);
-            const upper = mkBox(0.13, 0.42, 0.15, jacket);
-            upper.position.y = -0.21;
-            arm.add(upper);
-            const hand = mkBox(0.11, 0.14, 0.12, skin);
-            hand.position.y = -0.5;
-            arm.add(hand);
-            this.torso.add(arm);
-            return arm;
-        };
-        this.armL = mkArm(-1);
-        this.armR = mkArm(1);
-        const mkLeg = (side) => {
-            const leg = new THREE.Group();
-            leg.position.set(0.14 * side, 1.05, 0);
-            const thigh = mkBox(0.18, 0.5, 0.2, jeans);
-            thigh.position.y = -0.25;
-            leg.add(thigh);
-            const shin = mkBox(0.16, 0.5, 0.18, jeans);
-            shin.position.y = -0.75;
-            leg.add(shin);
-            const foot = mkBox(0.17, 0.09, 0.32, boot);
-            foot.position.set(0, -1.0, 0.06);
-            leg.add(foot);
-            this.group.add(leg);
-            return leg;
-        };
-        this.legL = mkLeg(-1);
-        this.legR = mkLeg(1);
-        this.group.add(this.torso);
-        this.buildWeaponMeshes();
-        this.group.traverse((o) => {
-            if (o instanceof THREE.Mesh)
-                o.castShadow = true;
-        });
-        this.group.position.copy(this.pos);
+        const built = buildMaraMesh();
+        this.group = built.group;
+        this.armL = built.armL;
+        this.armR = built.armR;
+        this.legL = built.legL;
+        this.legR = built.legR;
         scene.add(this.group);
+        this.weapons = WEAPONS.map((w) => ({ spec: w, clip: w.clip === Infinity ? Infinity : w.clip, reserve: w.reserve }));
     }
-    buildWeaponMeshes() {
-        const gunmetal = new THREE.MeshStandardMaterial({ color: 0x1c1f24, roughness: 0.4, metalness: 0.6 });
-        const wood = new THREE.MeshStandardMaterial({ color: 0x4a3220, roughness: 0.7 });
-        const mk = (parts) => {
-            const g = new THREE.Group();
-            for (const [w, h, d, x, y, z, m] of parts) {
-                const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m);
-                mesh.position.set(x, y, z);
-                g.add(mesh);
-            }
-            g.visible = false;
-            this.armR.add(g);
-            return g;
-        };
-        // Pistol: small slide + grip, held at the right hand.
-        this.weaponMeshes.set('kestrel', mk([
-            [0.05, 0.06, 0.24, 0, -0.52, 0.1, gunmetal],
-            [0.05, 0.12, 0.06, 0, -0.58, 0.02, wood],
-        ]));
-        this.muzzleZ.set('kestrel', 0.24);
-        // SMG: body + magazine + short barrel.
-        this.weaponMeshes.set('viper', mk([
-            [0.07, 0.09, 0.42, 0, -0.52, 0.12, gunmetal],
-            [0.05, 0.16, 0.06, 0, -0.62, 0.14, gunmetal],
-            [0.05, 0.05, 0.12, 0, -0.52, 0.36, gunmetal],
-        ]));
-        this.muzzleZ.set('viper', 0.44);
-        // Carbine: long body + stock + magazine.
-        this.weaponMeshes.set('bulldog', mk([
-            [0.07, 0.1, 0.62, 0, -0.52, 0.16, gunmetal],
-            [0.06, 0.14, 0.07, 0, -0.6, 0.05, gunmetal],
-            [0.06, 0.08, 0.2, 0, -0.52, -0.14, wood],
-            [0.04, 0.04, 0.2, 0, -0.52, 0.5, gunmetal],
-        ]));
-        this.muzzleZ.set('bulldog', 0.62);
+    get speed() {
+        return Math.hypot(this.vx, this.vz);
     }
-    setWeapon(id) {
-        this.currentWeapon = id;
-        for (const [key, mesh] of this.weaponMeshes)
-            mesh.visible = key === id;
+    get mph() {
+        return Math.abs(this.speed) * 2.237;
     }
-    muzzleWorldPos(out) {
-        const mesh = this.weaponMeshes.get(this.currentWeapon);
-        if (!mesh) {
-            out.copy(this.pos).add(new THREE.Vector3(0, 1.3, 0));
-            return out;
-        }
-        // The tip sits at the front of this weapon's barrel, not at a fixed
-        // length: a shared length lifts the pistol's muzzle above the target
-        // when the aim pose rotates the arm.
-        const tip = new THREE.Vector3(0, -0.52, this.muzzleZ.get(this.currentWeapon) ?? 0.24);
-        mesh.localToWorld(tip);
-        out.copy(tip);
-        return out;
+    get currentWeapon() {
+        return this.weapons[this.weaponIndex];
     }
-    update(dt, input, camYaw, city, blocked, aiming) {
-        if (this.state !== 'foot') {
-            this.group.visible = this.state !== 'vehicle';
-            return;
-        }
-        this.group.visible = true;
-        const fwd = input.down('w', 'arrowup') ? 1 : input.down('s', 'arrowdown') ? -1 : 0;
-        const strafe = input.down('d', 'arrowright') ? 1 : input.down('a', 'arrowleft') ? -1 : 0;
-        this.aiming = aiming && this.currentWeapon !== 'melee';
-        const sprint = input.down('shift') && fwd > 0 && !this.aiming;
-        const targetSpeed = this.aiming ? PLAYER.aimSpeed : sprint ? PLAYER.sprintSpeed : PLAYER.walkSpeed;
-        const moving = fwd !== 0 || strafe !== 0;
-        const speedTarget = moving ? targetSpeed : 0;
-        this.speed = lerp(this.speed, speedTarget, 1 - Math.exp(-10 * dt));
-        if (moving && !blocked) {
-            const moveAngle = camYaw + Math.atan2(strafe, fwd);
-            const nx = this.pos.x + Math.sin(moveAngle) * this.speed * dt;
-            const nz = this.pos.z + Math.cos(moveAngle) * this.speed * dt;
-            if (!city.isWater(nx, nz)) {
-                this.pos.x = nx;
-                this.pos.z = nz;
-            }
-            this.heading = this.aiming ? camYaw : angleLerp(this.heading, moveAngle, 1 - Math.exp(-12 * dt));
-        }
-        city.resolveCircle(this.pos, PLAYER.radius);
-        this.pos.x = clamp(this.pos.x, WORLD_MIN_X, WORLD_MAX_X);
-        this.pos.z = clamp(this.pos.z, WORLD_MIN_Z, WORLD_MAX_Z);
-        this.group.position.copy(this.pos);
-        this.group.rotation.y = this.heading;
-        if (this.meleeTimer > 0)
-            this.meleeTimer -= dt;
-        // Procedural animation.
-        const stride = clamp(this.speed / PLAYER.walkSpeed, 0, 1.8);
-        this.walkPhase += dt * (6 + stride * 6) * (this.speed > 0.1 ? 1 : 0);
-        const swing = Math.sin(this.walkPhase) * 0.55 * Math.min(stride, 1);
-        const idleSway = Math.sin(this.walkPhase * 0.5) * 0.03;
-        if (this.aiming) {
-            this.armR.rotation.x = -Math.PI / 2 + 0.15;
-            this.armL.rotation.x = -Math.PI / 2 + 0.35;
-            this.armL.rotation.z = 0.5;
-            this.legL.rotation.x = swing * 0.4;
-            this.legR.rotation.x = -swing * 0.4;
-            this.torso.rotation.x = 0.08;
-        }
-        else if (this.meleeTimer > 0) {
-            const t = 1 - this.meleeTimer / 0.35;
-            this.armR.rotation.x = -Math.PI * (0.4 + 0.5 * Math.sin(t * Math.PI));
-            this.armL.rotation.x = swing;
-            this.legL.rotation.x = swing;
-            this.legR.rotation.x = -swing;
-            this.torso.rotation.x = 0.12 * Math.sin(t * Math.PI);
-        }
-        else {
-            this.armR.rotation.x = swing;
-            this.armL.rotation.x = -swing;
-            this.armR.rotation.z = 0;
-            this.armL.rotation.z = 0;
-            this.legL.rotation.x = -swing;
-            this.legR.rotation.x = swing;
-            this.torso.rotation.x = stride > 0.3 ? 0.1 : idleSway;
-        }
-        this.torso.rotation.y = this.aiming ? 0 : 0;
-        this.head.rotation.x = this.aiming ? -0.05 : 0;
+    get radius() {
+        return PLAYER_TUNE.radius;
     }
-    melee() {
-        if (this.meleeTimer <= 0)
-            this.meleeTimer = 0.35;
+    place(x, z, heading) {
+        this.x = x;
+        this.z = z;
+        this.heading = heading;
+        this.vx = 0;
+        this.vz = 0;
+        this.syncMesh(0);
     }
-    teleport(x, z) {
-        this.pos.set(x, 0, z);
-        this.group.position.copy(this.pos);
+    hasWeapon(slot) {
+        const w = this.weapons[slot - 1];
+        return w !== undefined && w.spec.unlock === 0;
+    }
+    unlockWeapon(slot) {
+        const w = this.weapons[slot - 1];
+        if (w)
+            w.spec.unlock = 0;
     }
     takeDamage(amount) {
-        let left = amount;
+        if (this.dead)
+            return false;
+        let rest = amount;
         if (this.armor > 0) {
-            const absorbed = Math.min(this.armor, left);
+            const absorbed = Math.min(this.armor, rest);
             this.armor -= absorbed;
-            left -= absorbed;
+            rest -= absorbed;
         }
-        this.health = Math.max(0, this.health - left);
-        if (this.health <= 0)
-            this.state = 'dead';
+        this.health -= rest;
+        if (this.health <= 0) {
+            this.health = 0;
+            this.dead = true;
+            return true;
+        }
+        return false;
     }
     healFull() {
-        this.health = PLAYER.maxHealth;
+        this.health = PLAYER_TUNE.health;
+        this.armor = 0;
+        this.dead = false;
+    }
+    enterVehicle(v) {
+        this.inVehicle = v;
+        this.group.visible = false;
+    }
+    exitVehicle() {
+        const v = this.inVehicle;
+        if (!v)
+            return;
+        this.inVehicle = null;
+        const sx = Math.cos(v.heading);
+        const sz = -Math.sin(v.heading);
+        this.x = v.x + sx * (v.spec.width / 2 + 1.2);
+        this.z = v.z + sz * (v.spec.width / 2 + 1.2);
+        this.heading = v.heading;
+        this.group.visible = true;
+        this.syncMesh(0);
+    }
+    update(dt, input, cameraYaw, city) {
+        if (this.inVehicle || this.dead)
+            return;
+        const sin = Math.sin(cameraYaw);
+        const cos = Math.cos(cameraYaw);
+        // camera-relative movement: forward is the camera's view direction
+        // (away from the camera, into the screen), right is screen right
+        const mx = sin * input.fwd - cos * input.strafe;
+        const mz = cos * input.fwd + sin * input.strafe;
+        const mag = Math.hypot(mx, mz);
+        const targetSpeed = input.sprint ? PLAYER_TUNE.sprintSpeed : PLAYER_TUNE.walkSpeed;
+        if (mag > 0.01) {
+            const nx = mx / mag;
+            const nz = mz / mag;
+            const accel = PLAYER_TUNE.accel * dt;
+            this.vx += nx * accel;
+            this.vz += nz * accel;
+            const sp = Math.hypot(this.vx, this.vz);
+            if (sp > targetSpeed) {
+                this.vx = (this.vx / sp) * targetSpeed;
+                this.vz = (this.vz / sp) * targetSpeed;
+            }
+            const wantHeading = Math.atan2(this.vx, this.vz);
+            let d = wantHeading - this.heading;
+            while (d > Math.PI)
+                d -= Math.PI * 2;
+            while (d < -Math.PI)
+                d += Math.PI * 2;
+            this.heading += clamp(d, -9 * dt, 9 * dt);
+        }
+        else {
+            const sp = Math.hypot(this.vx, this.vz);
+            const dec = Math.min(sp, PLAYER_TUNE.accel * dt);
+            if (sp > 0.001) {
+                this.vx -= (this.vx / sp) * dec;
+                this.vz -= (this.vz / sp) * dec;
+            }
+            else {
+                this.vx = 0;
+                this.vz = 0;
+            }
+        }
+        const px = this.x;
+        const pz = this.z;
+        this.x += this.vx * dt;
+        this.z += this.vz * dt;
+        this.x = clamp(this.x, -890, 890);
+        this.z = clamp(this.z, -990, 890);
+        if (isWater(this.x, this.z)) {
+            this.x = px;
+            this.z = pz;
+            this.vx = 0;
+            this.vz = 0;
+        }
+        const hit = city.collideCircle(this.x, this.z, this.radius);
+        this.x = hit.x;
+        this.z = hit.z;
+        this.syncMesh(dt);
+    }
+    syncMesh(dt) {
+        this.group.position.set(this.x, 0, this.z);
+        this.group.rotation.y = this.heading;
+        const sp = this.speed;
+        this.walkPhase += sp * dt * 1.9;
+        const swing = clamp(sp / PLAYER_TUNE.walkSpeed, 0, 1.6) * 0.55;
+        const s = Math.sin(this.walkPhase);
+        this.legL.rotation.x = s * swing;
+        this.legR.rotation.x = -s * swing;
+        this.armL.rotation.x = -s * swing * 0.8;
+        this.armR.rotation.x = s * swing * 0.8;
+        // aim blend: right arm raises to point forward
+        const wantAim = 0;
+        this.aimBlend = lerp(this.aimBlend, wantAim, Math.min(1, dt * 8));
+        void this.aimBlend;
+    }
+    // Aim pose: right arm forward, body faces the camera's view direction
+    // (away from the camera, into the screen).
+    setAimPose(aiming, cameraYaw) {
+        if (this.inVehicle)
+            return;
+        if (aiming) {
+            this.heading = cameraYaw;
+            this.armR.rotation.x = -1.35;
+            this.armL.rotation.x = -0.9;
+            this.armL.rotation.z = 0.5;
+        }
+        else {
+            this.armL.rotation.z = 0;
+        }
     }
 }
-const WORLD_MIN_X = -890;
-const WORLD_MAX_X = 890;
-const WORLD_MIN_Z = -970;
-const WORLD_MAX_Z = 890;
+function lerp(a, b, t) {
+    return a + (b - a) * t;
+}

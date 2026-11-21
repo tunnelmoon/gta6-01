@@ -1,6 +1,8 @@
-// Seeded RNG (mulberry32) so screenshot and playtest runs are deterministic
-// for a given seed, while normal play uses a time-based seed.
+// Seeded deterministic random numbers (mulberry32). The world, traffic
+// and pedestrians all draw from seeded instances so a fixed seed builds
+// the same city every time and screenshots render identically.
 export class Rng {
+    state;
     constructor(seed) {
         this.state = seed >>> 0;
     }
@@ -22,12 +24,4 @@ export class Rng {
     chance(p) {
         return this.next() < p;
     }
-}
-export function hashSeed(text) {
-    let h = 2166136261;
-    for (let i = 0; i < text.length; i++) {
-        h ^= text.charCodeAt(i);
-        h = Math.imul(h, 16777619);
-    }
-    return h >>> 0;
 }

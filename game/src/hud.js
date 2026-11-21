@@ -1,171 +1,295 @@
-export class Hud {
+// HUD: every DOM readout, menu, toast, subtitle and banner. The HTML
+// structure lives in game/index.html; this class owns its state.
+import { RADIO } from './config.js';
+export class HUD {
+    cb;
+    el = {};
+    lastDistrict = '';
+    districtTimer = 0;
+    toastTimer = null;
+    subtitleTimer = null;
+    hitTimer = 0;
+    damageFlash = 0;
     constructor(cb) {
-        this.toastTimer = 0;
-        this.menus = new Map();
         this.cb = cb;
-        this.root = document.getElementById('hud');
-        this.starsEl = document.getElementById('stars');
-        this.cashEl = document.getElementById('cash');
-        this.weaponEl = document.getElementById('weapon-name');
-        this.ammoEl = document.getElementById('weapon-ammo');
-        this.healthFill = document.getElementById('health-fill');
-        this.armorFill = document.getElementById('armor-fill');
-        this.speedEl = document.getElementById('speed');
-        this.speedVal = document.getElementById('speed-val');
-        this.vehicleHpFill = document.getElementById('vehhp-fill');
-        this.vehicleRow = document.getElementById('vehhp-row');
-        this.districtEl = document.getElementById('district');
-        this.radioEl = document.getElementById('radio');
-        this.objectiveEl = document.getElementById('objective');
-        this.subtitleEl = document.getElementById('subtitle');
-        this.subtitleSpeaker = document.getElementById('subtitle-speaker');
-        this.subtitleText = document.getElementById('subtitle-text');
-        this.promptEl = document.getElementById('prompt');
-        this.toastEl = document.getElementById('toast');
-        for (const name of ['title', 'pause', 'shop', 'dead', 'complete', 'controls']) {
-            const el = document.getElementById('menu-' + name);
-            if (el)
-                this.menus.set(name, el);
+        const ids = [
+            'hud-live', 'hud', 'stars', 'cash', 'weapon-name', 'weapon-ammo', 'health-fill', 'armor-fill',
+            'speed-num', 'speed-label', 'veh-hp-fill', 'veh-hp-row', 'district', 'objective-title',
+            'objective-step', 'objective-dist', 'radio', 'crosshair', 'hitmarker', 'toast',
+            'subtitle', 'subtitle-speaker', 'subtitle-line', 'damage', 'letterbox-top',
+            'letterbox-bottom', 'interact', 'vault-wrap', 'vault-fill', 'title-screen',
+            'pause-menu', 'ending-screen', 'controls-screen', 'btn-new', 'btn-continue',
+            'btn-resume', 'btn-restart', 'btn-save', 'btn-quit', 'btn-controls', 'btn-back',
+            'quality', 'volume', 'ending-stats', 'loading', 'shop-panel', 'shop-title',
+            'shop-items', 'shop-close', 'minimap', 'wasted',
+        ];
+        for (const id of ids) {
+            const e = document.getElementById(id);
+            if (e)
+                this.el[id] = e;
         }
-        this.wireButtons();
+        this.bind('btn-new', () => cb.onNewGame());
+        this.bind('btn-continue', () => cb.onContinue());
+        this.bind('btn-resume', () => cb.onResume());
+        this.bind('btn-restart', () => cb.onRestartMission());
+        this.bind('btn-save', () => cb.onSave());
+        this.bind('btn-quit', () => cb.onQuit());
+        this.bind('btn-controls', () => this.show('controls-screen'));
+        this.bind('btn-back', () => this.hide('controls-screen'));
+        this.bind('shop-close', () => this.hide('shop-panel'));
+        const q = this.el['quality'];
+        if (q)
+            q.addEventListener('change', () => cb.onQuality(q.value));
+        const v = this.el['volume'];
+        if (v)
+            v.addEventListener('input', () => cb.onVolume(Number(v.value) / 100));
     }
-    wireButtons() {
-        const bind = (id, fn) => {
-            const el = document.getElementById(id);
-            if (el)
-                el.addEventListener('click', () => {
-                    fn();
-                });
-        };
-        bind('btn-newgame', () => this.cb.onNewGame());
-        bind('btn-continue', () => this.cb.onContinue());
-        bind('btn-controls', () => this.showMenu('controls'));
-        bind('btn-controls-back', () => this.showMenu('title'));
-        bind('btn-resume', () => this.cb.onResume());
-        bind('btn-restart-mission', () => this.cb.onRestartMission());
-        bind('btn-save', () => this.cb.onSave());
-        bind('btn-quit', () => this.cb.onQuitToTitle());
-        bind('btn-map', () => this.cb.onToggleMap());
-        bind('btn-dead-retry', () => this.cb.onResume());
-        bind('btn-complete-roam', () => this.cb.onResume());
-        bind('btn-shop-close', () => this.cb.onCloseShop());
-        for (const item of ['armor', 'ammo', 'repair', 'respray']) {
-            bind('shop-' + item, () => this.cb.onShopBuy(item));
-        }
-        for (const q of ['low', 'medium', 'high']) {
-            bind('quality-' + q, () => this.cb.onQuality(q));
-        }
+    bind(id, fn) {
+        const e = this.el[id];
+        if (e)
+            e.addEventListener('click', fn);
     }
-    showMenu(name) {
-        for (const [key, el] of this.menus) {
-            el.classList.toggle('visible', key === name);
-        }
-        this.root.classList.toggle('menu-open', name !== 'none');
+    show(id) {
+        this.el[id]?.classList.remove('hidden');
     }
-    hideMenus() {
-        this.showMenu('none');
+    hide(id) {
+        this.el[id]?.classList.add('hidden');
     }
-    setHealth(hp, armor) {
-        this.healthFill.style.width = Math.max(0, Math.min(100, hp)) + '%';
-        this.armorFill.style.width = Math.max(0, Math.min(100, armor)) + '%';
+    isShown(id) {
+        return !!this.el[id] && !this.el[id].classList.contains('hidden');
     }
-    setCash(cash) {
-        this.cashEl.textContent = '$' + Math.floor(cash).toLocaleString('en-US');
+    setLoading(text) {
+        const e = this.el['loading'];
+        if (e)
+            e.textContent = text;
     }
-    setStars(n) {
-        const stars = '★★★★★';
-        const filled = stars.slice(0, n);
-        const empty = stars.slice(n);
-        this.starsEl.innerHTML = '<span class="star-on">' + filled + '</span><span class="star-off">' + empty + '</span>';
+    hideLoading() {
+        this.hide('loading');
     }
-    setWeapon(name, clip, reserve, hasMag) {
-        this.weaponEl.textContent = name;
-        this.ammoEl.textContent = hasMag ? clip + ' / ' + reserve : '';
+    showTitle(hasSave) {
+        this.show('title-screen');
+        this.hide('pause-menu');
+        this.hide('ending-screen');
+        const c = this.el['btn-continue'];
+        if (c)
+            c.classList.toggle('hidden', !hasSave);
     }
-    setSpeed(mph, inVehicle, vehicleHpPct) {
-        this.speedEl.style.display = inVehicle ? 'block' : 'none';
-        this.speedVal.textContent = inVehicle ? String(Math.round(mph)) : '';
-        this.vehicleRow.style.display = inVehicle ? 'flex' : 'none';
-        this.vehicleHpFill.style.width = Math.max(0, Math.min(100, vehicleHpPct)) + '%';
+    hideTitle() {
+        this.hide('title-screen');
     }
-    setDistrict(name) {
-        if (this.districtEl.textContent !== name) {
-            this.districtEl.textContent = name;
-            this.districtEl.classList.remove('pop');
-            void this.districtEl.offsetWidth;
-            this.districtEl.classList.add('pop');
-        }
+    // The live HUD (minimap, bars, cash, stars, objective) starts hidden
+    // in the HTML and is shown only while actually playing, so the title
+    // screen stays clean and every gameplay shot carries the HUD.
+    showLive() {
+        this.show('hud-live');
     }
-    setRadio(station) {
-        this.radioEl.textContent = station === 'wave' ? 'SOLMAR WAVE 104.5' : station === 'heat' ? 'DORADO HEAT 98.2' : 'RADIO OFF';
+    hideLive() {
+        this.hide('hud-live');
     }
-    setObjective(text) {
-        this.objectiveEl.textContent = text;
-        this.objectiveEl.style.display = text ? 'block' : 'none';
+    showPause() {
+        this.show('pause-menu');
     }
-    showSubtitle(speaker, text) {
-        this.subtitleSpeaker.textContent = speaker;
-        this.subtitleText.textContent = text;
-        this.subtitleEl.classList.add('visible');
+    hidePause() {
+        this.hide('pause-menu');
+    }
+    showEnding(stats) {
+        const e = this.el['ending-stats'];
+        if (e)
+            e.textContent = stats;
+        this.show('ending-screen');
+    }
+    hideEnding() {
+        this.hide('ending-screen');
+    }
+    toast(msg) {
+        const e = this.el['toast'];
+        if (!e)
+            return;
+        e.textContent = msg;
+        e.classList.remove('hidden');
+        e.classList.add('show');
+        if (this.toastTimer !== null)
+            window.clearTimeout(this.toastTimer);
+        this.toastTimer = window.setTimeout(() => {
+            e.classList.remove('show');
+            e.classList.add('hidden');
+        }, 3200);
+    }
+    subtitle(speaker, line) {
+        const s = this.el['subtitle'];
+        const sp = this.el['subtitle-speaker'];
+        const ln = this.el['subtitle-line'];
+        if (!s || !sp || !ln)
+            return;
+        sp.textContent = speaker;
+        ln.textContent = line;
+        s.classList.remove('hidden');
+        if (this.subtitleTimer !== null)
+            window.clearTimeout(this.subtitleTimer);
+        this.subtitleTimer = window.setTimeout(() => s.classList.add('hidden'), 3400);
     }
     clearSubtitle() {
-        this.subtitleEl.classList.remove('visible');
+        this.el['subtitle']?.classList.add('hidden');
     }
-    showPrompt(text) {
-        this.promptEl.textContent = text;
-        this.promptEl.classList.add('visible');
+    letterbox(on) {
+        this.el['letterbox-top']?.classList.toggle('on', on);
+        this.el['letterbox-bottom']?.classList.toggle('on', on);
     }
-    hidePrompt() {
-        this.promptEl.classList.remove('visible');
+    hitmarker() {
+        this.hitTimer = 0.25;
+        const h = this.el['hitmarker'];
+        if (h)
+            h.classList.add('show');
     }
-    toast(text) {
-        this.toastEl.textContent = text;
-        this.toastEl.classList.add('visible');
-        window.clearTimeout(this.toastTimer);
-        this.toastTimer = window.setTimeout(() => this.toastEl.classList.remove('visible'), 3200);
+    damage() {
+        this.damageFlash = 1;
     }
-    setDeadTitle(kind) {
-        const el = document.getElementById('dead-title');
-        if (el)
-            el.textContent = kind;
+    setInteract(text) {
+        const e = this.el['interact'];
+        if (!e)
+            return;
+        if (text) {
+            e.textContent = text;
+            e.classList.remove('hidden');
+        }
+        else {
+            e.classList.add('hidden');
+        }
     }
-    setCompleteStats(cash, timeMin) {
-        const el = document.getElementById('complete-stats');
-        if (el)
-            el.textContent = 'Cash earned: $' + Math.floor(cash).toLocaleString('en-US') + ' - Time: ' + timeMin + ' min - Solmar is yours.';
+    setVaultProgress(p) {
+        const w = this.el['vault-wrap'];
+        const f = this.el['vault-fill'];
+        if (!w || !f)
+            return;
+        if (p === null) {
+            w.classList.add('hidden');
+            return;
+        }
+        w.classList.remove('hidden');
+        f.style.width = `${Math.round(p * 100)}%`;
     }
-    setShopPrices(discount, armor, ammo, repair, respray) {
-        const set = (id, v) => {
-            const el = document.getElementById(id);
-            if (el)
-                el.textContent = '$' + v;
-        };
-        set('price-armor', armor);
-        set('price-ammo', ammo);
-        set('price-repair', repair);
-        set('price-respray', respray);
-        const note = document.getElementById('shop-note');
-        if (note)
-            note.textContent = discount ? 'Story complete: 50% discount applied.' : 'Pay once, drive forever.';
+    showShop(title, items) {
+        const panel = this.el['shop-panel'];
+        const t = this.el['shop-title'];
+        const list = this.el['shop-items'];
+        if (!panel || !t || !list)
+            return;
+        t.textContent = title;
+        list.innerHTML = '';
+        for (const item of items) {
+            const row = document.createElement('div');
+            row.className = 'shop-row';
+            const label = document.createElement('span');
+            label.textContent = item.label;
+            const btn = document.createElement('button');
+            btn.className = 'shop-buy';
+            btn.textContent = `$${item.price}`;
+            btn.disabled = !item.canAfford;
+            btn.addEventListener('click', () => {
+                item.onBuy();
+                this.hide('shop-panel');
+            });
+            row.appendChild(label);
+            row.appendChild(btn);
+            list.appendChild(row);
+        }
+        panel.classList.remove('hidden');
     }
-    setContinueVisible(visible) {
-        const el = document.getElementById('btn-continue');
-        if (el)
-            el.style.display = visible ? 'block' : 'none';
+    hideShop() {
+        this.hide('shop-panel');
     }
-    setHudVisible(v) {
-        const el = document.getElementById('hud-live');
-        if (el)
-            el.style.display = v ? 'block' : 'none';
+    update(s, dt) {
+        // stars
+        const starsEl = this.el['stars'];
+        if (starsEl) {
+            const spans = starsEl.children;
+            for (let i = 0; i < spans.length; i++) {
+                spans[i].classList.toggle('lit', i < s.stars);
+            }
+            starsEl.classList.toggle('hot', s.stars > 0);
+        }
+        const cash = this.el['cash'];
+        if (cash)
+            cash.textContent = `$${s.cash.toLocaleString('en-US')}`;
+        const wn = this.el['weapon-name'];
+        if (wn)
+            wn.textContent = s.weaponName;
+        const wa = this.el['weapon-ammo'];
+        if (wa) {
+            wa.textContent = s.clip === Infinity ? '∞' : `${s.clip} / ${s.reserve === Infinity ? '∞' : s.reserve}`;
+        }
+        const hf = this.el['health-fill'];
+        if (hf)
+            hf.style.width = `${Math.max(0, Math.min(100, s.health))}%`;
+        const af = this.el['armor-fill'];
+        if (af)
+            af.style.width = `${Math.max(0, Math.min(100, s.armor))}%`;
+        const sp = this.el['speed-num'];
+        if (sp)
+            sp.textContent = s.inVehicle ? `${Math.round(s.speedMph)}` : '';
+        const sl = this.el['speed-label'];
+        if (sl)
+            sl.textContent = s.inVehicle ? 'MPH' : '';
+        const vr = this.el['veh-hp-row'];
+        if (vr)
+            vr.classList.toggle('hidden', !s.inVehicle);
+        const vf = this.el['veh-hp-fill'];
+        if (vf)
+            vf.style.width = `${Math.max(0, Math.min(100, (s.vehHp / Math.max(1, s.vehHpMax)) * 100))}%`;
+        // district banner
+        if (s.district !== this.lastDistrict) {
+            this.lastDistrict = s.district;
+            this.districtTimer = 2.6;
+            const d = this.el['district'];
+            if (d) {
+                d.textContent = s.district;
+                d.classList.remove('hidden');
+                d.classList.add('show');
+            }
+        }
+        if (this.districtTimer > 0) {
+            this.districtTimer -= dt;
+            if (this.districtTimer <= 0) {
+                this.el['district']?.classList.add('hidden');
+                this.el['district']?.classList.remove('show');
+            }
+        }
+        // objective
+        const ot = this.el['objective-title'];
+        if (ot)
+            ot.textContent = s.objectiveTitle;
+        const os = this.el['objective-step'];
+        if (os)
+            os.textContent = s.objectiveStep;
+        const od = this.el['objective-dist'];
+        if (od)
+            od.textContent = s.objectiveDist > 0 ? `${Math.round(s.objectiveDist)}m` : '';
+        // radio
+        const r = this.el['radio'];
+        if (r)
+            r.textContent = s.radio;
+        // hitmarker decay
+        if (this.hitTimer > 0) {
+            this.hitTimer -= dt;
+            if (this.hitTimer <= 0)
+                this.el['hitmarker']?.classList.remove('show');
+        }
+        // damage vignette decay
+        if (this.damageFlash > 0) {
+            this.damageFlash = Math.max(0, this.damageFlash - dt * 1.6);
+            const d = this.el['damage'];
+            if (d)
+                d.style.opacity = `${this.damageFlash * 0.55}`;
+        }
     }
-    setLoading(done) {
-        const el = document.getElementById('loading');
-        if (el)
-            el.style.display = done ? 'none' : 'flex';
+    showWasted() {
+        const w = this.el['wasted'];
+        if (!w)
+            return;
+        w.classList.remove('hidden');
+        window.setTimeout(() => w.classList.add('hidden'), 2200);
     }
-    setLoadingText(text) {
-        const el = document.getElementById('loading-text');
-        if (el)
-            el.textContent = text;
+    radioName(i) {
+        return RADIO[i]?.name ?? '';
     }
 }

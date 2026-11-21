@@ -1,200 +1,358 @@
-// Renderer and camera: WebGL setup, a spring-damped third-person orbit
-// camera with collision pull-in, trauma-based screen shake (summed sines,
-// never random per frame), FOV speed effect, and a pooled particle system.
+// Renderer, sky, lighting, day cycle, chase camera rig with collision,
+// screen shake, pooled particles and bullet tracers.
 import * as THREE from 'three';
-import { clamp, lerp } from './config.js';
-import { Rng } from './rng.js';
-export class Renderer {
-    constructor(canvas, lowFx = false) {
-        this.renderer = new THREE.WebGLRenderer({ canvas, antialias: !lowFx, powerPreference: 'high-performance' });
-        this.renderer.setPixelRatio(lowFx ? 1 : Math.min(window.devicePixelRatio, 2));
-        this.renderer.shadowMap.enabled = !lowFx;
-        this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-        this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-        this.renderer.toneMappingExposure = 1.05;
-        this.scene = new THREE.Scene();
-        this.camera = new THREE.PerspectiveCamera(68, 1, 0.1, 6000);
-        this.resize();
-        window.addEventListener('resize', () => this.resize());
-    }
-    resize() {
-        const w = window.innerWidth;
-        const h = window.innerHeight;
-        this.renderer.setSize(w, h, false);
-        this.camera.aspect = w / h;
-        this.camera.updateProjectionMatrix();
-    }
-    render() {
-        this.renderer.render(this.scene, this.camera);
-    }
-}
+import { pushOutAABB } from './city.js';
+import { PALETTE, clamp, lerp } from './config.js';
+import { glowTexture, skyTexture } from './textures.js';
 export class CameraRig {
-    constructor() {
-        this.yaw = 0;
-        this.pitch = 0.32;
-        this.distance = 7.5;
-        this.targetDistance = 7.5;
-        this.trauma = 0;
-        this.shakeT = 0;
-        this.fov = 68;
-        this.currentPos = new THREE.Vector3();
-        this.currentLook = new THREE.Vector3();
-        this.cutsceneActive = false;
-        this.cutFrom = new THREE.Vector3();
-        this.cutTo = new THREE.Vector3();
-        this.cutLookFrom = new THREE.Vector3();
-        this.cutLookTo = new THREE.Vector3();
-        this.cutT = 0;
-        this.cutDur = 1;
+    camera;
+    yaw = 0;
+    pitch = 0.32;
+    dist = 8.5;
+    trauma = 0;
+    shakeT = 0;
+    pos = new THREE.Vector3();
+    desired = new THREE.Vector3();
+    tmp = new THREE.Vector3();
+    constructor(camera) {
+        this.camera = camera;
     }
     addTrauma(amount) {
         this.trauma = clamp(this.trauma + amount, 0, 1);
     }
-    setCutscene(from, to, lookFrom, lookTo, dur) {
-        this.cutsceneActive = true;
-        this.cutFrom.copy(from);
-        this.cutTo.copy(to);
-        this.cutLookFrom.copy(lookFrom);
-        this.cutLookTo.copy(lookTo);
-        this.cutT = 0;
-        this.cutDur = Math.max(0.5, dur);
+    // Mouse orbit deltas (degrees per pixel tuned by caller).
+    orbit(dx, dy) {
+        this.yaw -= dx * 0.0032;
+        this.pitch = clamp(this.pitch + dy * 0.0028, 0.06, 1.15);
     }
-    endCutscene() {
-        this.cutsceneActive = false;
+    setYaw(yaw) {
+        this.yaw = yaw;
     }
-    isCutscene() {
-        return this.cutsceneActive;
+    getYaw() {
+        return this.yaw;
     }
-    update(dt, target, speed, city, camera, aiming) {
-        const realDt = dt;
-        if (this.trauma > 0) {
-            this.trauma = Math.max(0, this.trauma - 1.4 * realDt);
-            this.shakeT += realDt * 31;
-        }
-        const wantFov = aiming ? 58 : 68 + clamp(speed / 50, 0, 1) * 12;
-        this.fov = lerp(this.fov, wantFov, 1 - Math.exp(-6 * dt));
-        if (Math.abs(camera.fov - this.fov) > 0.05) {
-            camera.fov = this.fov;
-            camera.updateProjectionMatrix();
-        }
-        this.targetDistance = aiming ? 4.2 : 7.5;
-        // While aiming, ease the camera toward level so the crosshair sits
-        // near the bullet line instead of pointing at the ground ahead.
-        if (aiming)
-            this.pitch = lerp(this.pitch, 0.12, 1 - Math.exp(-6 * dt));
-        if (this.cutsceneActive) {
-            this.cutT += dt;
-            const t = clamp(this.cutT / this.cutDur, 0, 1);
-            const e = t * t * (3 - 2 * t);
-            const pos = new THREE.Vector3().lerpVectors(this.cutFrom, this.cutTo, e);
-            const look = new THREE.Vector3().lerpVectors(this.cutLookFrom, this.cutLookTo, e);
-            this.applyShake(camera, pos, look);
-            return;
-        }
-        // Spring-damped distance: pull in fast, ease out slow.
-        const rate = this.distance > this.targetDistance ? 14 : 5;
-        this.distance = lerp(this.distance, this.targetDistance, 1 - Math.exp(-rate * dt));
-        const lookTarget = new THREE.Vector3(target.x, target.y + 1.7, target.z);
-        const sinP = Math.sin(this.pitch);
-        const cosP = Math.cos(this.pitch);
-        const offset = new THREE.Vector3(-Math.sin(this.yaw) * cosP, sinP, -Math.cos(this.yaw) * cosP);
-        let dist = this.distance;
-        // Collision pull-in: step the camera ray back until it clears buildings.
-        const dir = offset.clone().normalize();
-        for (let d = dist; d > 1.2; d -= 0.6) {
-            const p = new THREE.Vector3().copy(lookTarget).addScaledVector(dir, d);
-            if (p.y < 0.6) {
-                dist = d;
-                break;
-            }
-            if (city.collidesCircle(p.x, p.z, 0.4)) {
-                dist = Math.max(1.2, d - 0.6);
-                break;
+    update(dt, target, city, aiming) {
+        const wantDist = aiming ? 5.5 : 8.5;
+        this.dist = lerp(this.dist, wantDist, Math.min(1, dt * 4));
+        const sin = Math.sin(this.yaw);
+        const cos = Math.cos(this.yaw);
+        const cx = target.x - sin * Math.cos(this.pitch) * this.dist;
+        const cz = target.z - cos * Math.cos(this.pitch) * this.dist;
+        const cy = target.y + 1.6 + Math.sin(this.pitch) * this.dist;
+        this.desired.set(cx, Math.max(cy, 1.4), cz);
+        // collision: pull the camera out of any building it sits inside
+        for (const b of city.colliders) {
+            const m = 0.6;
+            if (this.desired.x > b.minX - m && this.desired.x < b.maxX + m && this.desired.z > b.minZ - m && this.desired.z < b.maxZ + m) {
+                const p = pushOutAABB(this.desired.x, this.desired.z, m, b);
+                this.desired.x = p.x;
+                this.desired.z = p.z;
             }
         }
-        const desired = new THREE.Vector3().copy(lookTarget).addScaledVector(dir, dist);
-        if (desired.y < 0.7)
-            desired.y = 0.7;
-        const k = 1 - Math.exp(-18 * dt);
-        this.currentPos.lerp(desired, k);
-        this.currentLook.lerp(lookTarget, 1 - Math.exp(-22 * dt));
-        this.applyShake(camera, this.currentPos, this.currentLook);
-    }
-    applyShake(camera, pos, look) {
+        const k = 1 - Math.exp(-dt * 9);
+        this.pos.lerp(this.desired, k);
+        if (this.pos.lengthSq() === 0)
+            this.pos.copy(this.desired);
+        // trauma shake (summed sines, decays in real time)
+        this.trauma = Math.max(0, this.trauma - dt * 1.4);
+        this.shakeT += dt * 31;
         const s = this.trauma * this.trauma;
-        const ox = 0.35 * s * Math.sin(this.shakeT * 1.7);
-        const oy = 0.28 * s * Math.sin(this.shakeT * 2.3);
-        const oz = 0.35 * s * Math.sin(this.shakeT * 1.1);
-        camera.position.set(pos.x + ox, pos.y + oy, pos.z + oz);
-        camera.lookAt(look);
+        const ox = 0.5 * s * Math.sin(this.shakeT * 1.7);
+        const oy = 0.35 * s * Math.sin(this.shakeT * 2.3);
+        this.camera.position.set(this.pos.x + ox, this.pos.y + oy, this.pos.z);
+        this.tmp.set(target.x, target.y + 1.7, target.z);
+        this.camera.lookAt(this.tmp);
+        // FOV widens with speed
+        const wantFov = 68 + clamp(Math.abs(target.speed) / 55, 0, 1) * 12 + (aiming ? -6 : 0);
+        if (Math.abs(this.camera.fov - wantFov) > 0.05) {
+            this.camera.fov = lerp(this.camera.fov, wantFov, Math.min(1, dt * 5));
+            this.camera.updateProjectionMatrix();
+        }
     }
-    snapTo(target) {
-        const lookTarget = new THREE.Vector3(target.x, target.y + 1.7, target.z);
-        const sinP = Math.sin(this.pitch);
-        const cosP = Math.cos(this.pitch);
-        this.currentPos.set(lookTarget.x - Math.sin(this.yaw) * cosP * this.distance, lookTarget.y + sinP * this.distance, lookTarget.z - Math.cos(this.yaw) * cosP * this.distance);
-        this.currentLook.copy(lookTarget);
+    // Instant snap (cutscenes, teleports).
+    snap(target) {
+        const sin = Math.sin(this.yaw);
+        const cos = Math.cos(this.yaw);
+        this.pos.set(target.x - sin * Math.cos(this.pitch) * this.dist, target.y + 1.6 + Math.sin(this.pitch) * this.dist, target.z - cos * Math.cos(this.pitch) * this.dist);
+        this.camera.position.copy(this.pos);
+        this.tmp.set(target.x, target.y + 1.7, target.z);
+        this.camera.lookAt(this.tmp);
     }
 }
-// Pooled point particles: sparks, smoke puffs, blood hits, explosion debris.
-// One THREE.Points draw call, fixed capacity, recycled slots.
+const MAX_PARTICLES = 900;
 export class Particles {
+    points;
+    posAttr;
+    colAttr;
+    sizeAttr;
+    pool = [];
+    geo;
     constructor(scene) {
-        this.capacity = 700;
-        this.rng = new Rng(987654321);
-        this.head = 0;
-        this.positions = new Float32Array(this.capacity * 3);
-        this.colors = new Float32Array(this.capacity * 3);
-        this.vel = new Float32Array(this.capacity * 3);
-        this.life = new Float32Array(this.capacity);
-        this.maxLife = new Float32Array(this.capacity);
         this.geo = new THREE.BufferGeometry();
-        this.geo.setAttribute('position', new THREE.BufferAttribute(this.positions, 3));
-        this.geo.setAttribute('color', new THREE.BufferAttribute(this.colors, 3));
-        const mat = new THREE.PointsMaterial({ size: 0.35, vertexColors: true, transparent: true, opacity: 0.95, depthWrite: false });
+        const pos = new Float32Array(MAX_PARTICLES * 3);
+        const col = new Float32Array(MAX_PARTICLES * 3);
+        const size = new Float32Array(MAX_PARTICLES);
+        for (let i = 0; i < MAX_PARTICLES; i++) {
+            pos[i * 3 + 1] = -100;
+            this.pool.push({ alive: false, x: 0, y: -100, z: 0, vx: 0, vy: 0, vz: 0, life: 0, maxLife: 1, size: 1, r: 1, g: 1, b: 1, gravity: 0, drag: 0 });
+        }
+        this.posAttr = new THREE.BufferAttribute(pos, 3);
+        this.colAttr = new THREE.BufferAttribute(col, 3);
+        this.sizeAttr = new THREE.BufferAttribute(size, 1);
+        this.geo.setAttribute('position', this.posAttr);
+        this.geo.setAttribute('color', this.colAttr);
+        this.geo.setAttribute('psize', this.sizeAttr);
+        const mat = new THREE.ShaderMaterial({
+            transparent: true,
+            depthWrite: false,
+            vertexShader: `
+        attribute float psize;
+        varying vec3 vColor;
+        void main() {
+          vColor = color;
+          vec4 mv = modelViewMatrix * vec4(position, 1.0);
+          gl_PointSize = psize * (240.0 / -mv.z);
+          gl_Position = projectionMatrix * mv;
+        }`,
+            fragmentShader: `
+        varying vec3 vColor;
+        void main() {
+          vec2 uv = gl_PointCoord - 0.5;
+          float d = length(uv);
+          if (d > 0.5) discard;
+          float a = smoothstep(0.5, 0.1, d) * 0.85;
+          gl_FragColor = vec4(vColor, a);
+        }`,
+            vertexColors: true,
+        });
         this.points = new THREE.Points(this.geo, mat);
         this.points.frustumCulled = false;
-        for (let i = 0; i < this.capacity; i++)
-            this.positions[i * 3 + 1] = -100;
         scene.add(this.points);
     }
-    spawn(x, y, z, vx, vy, vz, life, r, g, b) {
-        const i = this.head;
-        this.head = (this.head + 1) % this.capacity;
-        this.positions[i * 3] = x;
-        this.positions[i * 3 + 1] = y;
-        this.positions[i * 3 + 2] = z;
-        this.vel[i * 3] = vx;
-        this.vel[i * 3 + 1] = vy;
-        this.vel[i * 3 + 2] = vz;
-        this.colors[i * 3] = r;
-        this.colors[i * 3 + 1] = g;
-        this.colors[i * 3 + 2] = b;
-        this.life[i] = life;
-        this.maxLife[i] = life;
-    }
-    burst(pos, count, speed, life, r, g, b, up = 0.5) {
-        for (let i = 0; i < count; i++) {
-            const a = this.rng.next() * Math.PI * 2;
-            const s = speed * (0.3 + this.rng.next() * 0.7);
-            this.spawn(pos.x, pos.y, pos.z, Math.cos(a) * s, up * speed * this.rng.next(), Math.sin(a) * s, life * (0.6 + this.rng.next() * 0.7), r, g, b);
+    spawn(x, y, z, vx, vy, vz, life, size, r, g, b, gravity = 0, drag = 0) {
+        for (const p of this.pool) {
+            if (p.alive)
+                continue;
+            p.alive = true;
+            p.x = x;
+            p.y = y;
+            p.z = z;
+            p.vx = vx;
+            p.vy = vy;
+            p.vz = vz;
+            p.life = life;
+            p.maxLife = life;
+            p.size = size;
+            p.r = r;
+            p.g = g;
+            p.b = b;
+            p.gravity = gravity;
+            p.drag = drag;
+            return;
         }
+    }
+    burst(x, y, z, n, speed, life, size, r, g, b, gravity = -4) {
+        for (let i = 0; i < n; i++) {
+            const a = Math.random() * Math.PI * 2;
+            const e = Math.random() * Math.PI - Math.PI / 2;
+            const s = speed * (0.4 + Math.random() * 0.8);
+            this.spawn(x, y, z, Math.cos(a) * Math.cos(e) * s, Math.sin(e) * s + speed * 0.4, Math.sin(a) * Math.cos(e) * s, life * (0.6 + Math.random() * 0.7), size, r, g, b, gravity, 1.5);
+        }
+    }
+    smoke(x, y, z) {
+        this.spawn(x, y, z, (Math.random() - 0.5) * 0.6, 1.4 + Math.random(), (Math.random() - 0.5) * 0.6, 1.6, 2.2, 0.25, 0.25, 0.25, 1.2, 0.4);
     }
     update(dt) {
-        for (let i = 0; i < this.capacity; i++) {
-            if (this.life[i] <= 0)
-                continue;
-            this.life[i] -= dt;
-            if (this.life[i] <= 0) {
-                this.positions[i * 3 + 1] = -100;
+        const pos = this.posAttr.array;
+        const col = this.colAttr.array;
+        const size = this.sizeAttr.array;
+        for (let i = 0; i < MAX_PARTICLES; i++) {
+            const p = this.pool[i];
+            if (!p.alive) {
+                pos[i * 3 + 1] = -100;
+                size[i] = 0;
                 continue;
             }
-            this.vel[i * 3 + 1] -= 6 * dt;
-            this.positions[i * 3] += this.vel[i * 3] * dt;
-            this.positions[i * 3 + 1] += this.vel[i * 3 + 1] * dt;
-            this.positions[i * 3 + 2] += this.vel[i * 3 + 2] * dt;
+            p.life -= dt;
+            if (p.life <= 0) {
+                p.alive = false;
+                pos[i * 3 + 1] = -100;
+                size[i] = 0;
+                continue;
+            }
+            const dragF = Math.max(0, 1 - p.drag * dt);
+            p.vx *= dragF;
+            p.vz *= dragF;
+            p.vy = p.vy * dragF + p.gravity * dt;
+            p.x += p.vx * dt;
+            p.y += p.vy * dt;
+            p.z += p.vz * dt;
+            const f = p.life / p.maxLife;
+            pos[i * 3] = p.x;
+            pos[i * 3 + 1] = p.y;
+            pos[i * 3 + 2] = p.z;
+            col[i * 3] = p.r;
+            col[i * 3 + 1] = p.g;
+            col[i * 3 + 2] = p.b;
+            size[i] = p.size * (0.5 + f * 0.5);
         }
-        this.geo.attributes.position.needsUpdate = true;
-        this.geo.attributes.color.needsUpdate = true;
+        this.posAttr.needsUpdate = true;
+        this.colAttr.needsUpdate = true;
+        this.sizeAttr.needsUpdate = true;
+    }
+}
+const MAX_TRACERS = 24;
+export class Tracers {
+    lines;
+    posAttr;
+    life = [];
+    constructor(scene) {
+        const geo = new THREE.BufferGeometry();
+        const pos = new Float32Array(MAX_TRACERS * 6);
+        for (let i = 0; i < MAX_TRACERS; i++) {
+            pos[i * 6 + 1] = -100;
+            pos[i * 6 + 4] = -100;
+            this.life.push(0);
+        }
+        this.posAttr = new THREE.BufferAttribute(pos, 3);
+        geo.setAttribute('position', this.posAttr);
+        const mat = new THREE.LineBasicMaterial({ color: 0xffe9a8, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false });
+        this.lines = new THREE.LineSegments(geo, mat);
+        this.lines.frustumCulled = false;
+        scene.add(this.lines);
+    }
+    fire(x1, y1, z1, x2, y2, z2) {
+        let slot = -1;
+        for (let i = 0; i < MAX_TRACERS; i++) {
+            if (this.life[i] <= 0) {
+                slot = i;
+                break;
+            }
+        }
+        if (slot < 0)
+            slot = 0;
+        const pos = this.posAttr.array;
+        pos[slot * 6] = x1;
+        pos[slot * 6 + 1] = y1;
+        pos[slot * 6 + 2] = z1;
+        pos[slot * 6 + 3] = x2;
+        pos[slot * 6 + 4] = y2;
+        pos[slot * 6 + 5] = z2;
+        this.life[slot] = 0.09;
+        this.posAttr.needsUpdate = true;
+    }
+    update(dt) {
+        let dirty = false;
+        const pos = this.posAttr.array;
+        for (let i = 0; i < MAX_TRACERS; i++) {
+            if (this.life[i] > 0) {
+                this.life[i] -= dt;
+                if (this.life[i] <= 0) {
+                    pos[i * 6 + 1] = -100;
+                    pos[i * 6 + 4] = -100;
+                    dirty = true;
+                }
+            }
+        }
+        if (dirty)
+            this.posAttr.needsUpdate = true;
+    }
+}
+export class RenderWorld {
+    renderer;
+    scene;
+    camera;
+    rig;
+    particles;
+    tracers;
+    sun;
+    hemi;
+    sunSprite;
+    skyMat;
+    timeOfDay = 0.62; // 0 dawn, 0.5 noon, 0.62 golden sunset, 1 night
+    quality = 'high';
+    constructor(canvas) {
+        this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
+        this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        this.renderer.shadowMap.enabled = true;
+        this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        this.renderer.toneMappingExposure = 1.05;
+        this.scene = new THREE.Scene();
+        this.scene.fog = new THREE.Fog(PALETTE.fog, 180, 1150);
+        this.camera = new THREE.PerspectiveCamera(68, 1, 0.1, 2600);
+        this.rig = new CameraRig(this.camera);
+        // sky dome
+        const skyGeo = new THREE.SphereGeometry(2400, 24, 16);
+        this.skyMat = new THREE.MeshBasicMaterial({ map: skyTexture(), side: THREE.BackSide, fog: false, depthWrite: false });
+        const sky = new THREE.Mesh(skyGeo, this.skyMat);
+        this.scene.add(sky);
+        // sun sprite
+        const sunMat = new THREE.SpriteMaterial({ map: glowTexture(), color: PALETTE.sun, fog: false, depthWrite: false, transparent: true });
+        this.sunSprite = new THREE.Sprite(sunMat);
+        this.sunSprite.scale.set(320, 320, 1);
+        this.scene.add(this.sunSprite);
+        // lights
+        this.hemi = new THREE.HemisphereLight(0xffd9b0, 0x2a2a3a, 0.85);
+        this.scene.add(this.hemi);
+        this.sun = new THREE.DirectionalLight(0xffb347, 2.2);
+        this.sun.castShadow = true;
+        this.sun.shadow.mapSize.set(2048, 2048);
+        this.sun.shadow.camera.left = -90;
+        this.sun.shadow.camera.right = 90;
+        this.sun.shadow.camera.top = 90;
+        this.sun.shadow.camera.bottom = -90;
+        this.sun.shadow.camera.near = 10;
+        this.sun.shadow.camera.far = 500;
+        this.sun.shadow.bias = -0.0004;
+        this.scene.add(this.sun);
+        this.scene.add(this.sun.target);
+        this.particles = new Particles(this.scene);
+        this.tracers = new Tracers(this.scene);
+        this.applyTimeOfDay();
+    }
+    setQuality(q) {
+        this.quality = q;
+        this.renderer.setPixelRatio(q === 'low' ? 1 : Math.min(window.devicePixelRatio, q === 'medium' ? 1.5 : 2));
+        this.renderer.shadowMap.enabled = q !== 'low';
+        this.sun.castShadow = q !== 'low';
+    }
+    getQuality() {
+        return this.quality;
+    }
+    setTimeOfDay(t) {
+        this.timeOfDay = clamp(t, 0, 1);
+        this.applyTimeOfDay();
+    }
+    getTimeOfDay() {
+        return this.timeOfDay;
+    }
+    applyTimeOfDay() {
+        const t = this.timeOfDay;
+        // sun elevation: high at noon (0.5), low at golden hour (0.62), below horizon at night
+        const elev = Math.sin((0.5 - Math.abs(t - 0.5)) * Math.PI) * 0.9 + 0.08;
+        const az = lerp(-0.6, 0.9, t);
+        const dist = 420;
+        this.sun.position.set(Math.sin(az) * dist * Math.cos(elev), Math.sin(elev) * dist, -Math.cos(az) * dist * Math.cos(elev));
+        this.sunSprite.position.set(Math.sin(az) * 2100, Math.max(60, Math.sin(elev) * 2100), -Math.cos(az) * 2100);
+        const warm = t > 0.55 && t < 0.75 ? 1 : 0.55;
+        this.sun.color.setHex(warm > 0.8 ? 0xffb347 : 0xfff2d8);
+        this.sun.intensity = t > 0.85 ? 0.25 : 2.2;
+        this.hemi.intensity = t > 0.85 ? 0.35 : 0.85;
+        const fogColor = t > 0.85 ? 0x1a2233 : t > 0.55 && t < 0.75 ? 0xe89a6a : 0xa8c8e8;
+        this.scene.fog.color.setHex(fogColor);
+    }
+    followSun(px, pz) {
+        this.sun.position.x += px;
+        this.sun.position.z += pz;
+        this.sun.target.position.set(px, 0, pz);
+    }
+    resize(w, h) {
+        this.renderer.setSize(w, h, false);
+        this.camera.aspect = w / Math.max(1, h);
+        this.camera.updateProjectionMatrix();
+    }
+    render() {
+        this.renderer.render(this.scene, this.camera);
     }
 }

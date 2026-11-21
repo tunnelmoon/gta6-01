@@ -1,228 +1,259 @@
-// Vehicles: 7 archetypes built from boxes and cylinders, with arcade
-// physics (accel, brake, steering, drift, suspension pitch/roll), damage
-// states (smoke, fire, explosion) and headlights. Traffic AI drives the
-// same class through a driver interface.
+// Vehicle archetypes, meshes, arcade physics, damage and explosions.
 import * as THREE from 'three';
-import { VEHICLES, clamp, lerp } from './config.js';
-export class Vehicle {
-    constructor(def, scene, rng) {
-        this.group = new THREE.Group();
-        this.pos = new THREE.Vector3();
-        this.heading = 0;
-        this.speed = 0;
-        this.steerAngle = 0;
-        this.exploded = false;
-        this.isPlayerDriven = false;
-        this.ai = false;
-        this.wheels = [];
-        this.lightbarL = null;
-        this.lightbarR = null;
-        this.smokeTimer = 0;
-        this.fireTimer = 0;
-        this.flashT = 0;
-        this.paintMat = null;
-        this.onSmoke = null;
-        this.onExplode = null;
-        this.def = def;
-        this.hp = def.hp;
-        this.body = this.buildMesh(def, rng);
-        this.group.add(this.body);
-        scene.add(this.group);
+import { VEHICLES, clamp, isWater } from './config.js';
+export function buildVehicleMesh(spec, bodyColor) {
+    const group = new THREE.Group();
+    const bodyCol = bodyColor ?? spec.body;
+    const bodyMat = new THREE.MeshStandardMaterial({ color: bodyCol, roughness: 0.35, metalness: 0.55 });
+    const trimMat = new THREE.MeshStandardMaterial({ color: spec.trim, roughness: 0.5, metalness: 0.3 });
+    const glassMat = new THREE.MeshStandardMaterial({ color: 0x18242e, roughness: 0.15, metalness: 0.7 });
+    const L = spec.length;
+    const W = spec.width;
+    const H = spec.height;
+    const body = new THREE.Mesh(new THREE.BoxGeometry(W, H * 0.42, L), bodyMat);
+    body.position.y = H * 0.42;
+    body.castShadow = true;
+    group.add(body);
+    const cabinH = H * 0.42;
+    const cabin = new THREE.Mesh(new THREE.BoxGeometry(W * 0.82, cabinH, L * 0.5), glassMat);
+    cabin.position.set(0, H * 0.42 + cabinH / 2 + H * 0.18, -L * 0.06);
+    cabin.castShadow = true;
+    group.add(cabin);
+    const hood = new THREE.Mesh(new THREE.BoxGeometry(W * 0.92, H * 0.14, L * 0.2), trimMat);
+    hood.position.set(0, H * 0.42 + H * 0.1, L * 0.38);
+    group.add(hood);
+    // headlights + taillights
+    const lightMat = new THREE.MeshStandardMaterial({ color: 0xfff2c8, emissive: 0xffedb0, emissiveIntensity: 0.9 });
+    for (const sx of [-1, 1]) {
+        const hl = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.16, 0.08), lightMat);
+        hl.position.set(sx * (W / 2 - 0.35), H * 0.42, L / 2 + 0.02);
+        group.add(hl);
+        const tl = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.14, 0.08), new THREE.MeshStandardMaterial({ color: 0x881111, emissive: 0xcc2222, emissiveIntensity: 0.7 }));
+        tl.position.set(sx * (W / 2 - 0.35), H * 0.46, -L / 2 - 0.02);
+        group.add(tl);
     }
-    buildMesh(def, rng) {
-        const g = new THREE.Group();
-        const paint = new THREE.MeshStandardMaterial({ color: def.color, roughness: 0.35, metalness: 0.55 });
-        this.paintMat = paint;
-        const dark = new THREE.MeshStandardMaterial({ color: 0x14181d, roughness: 0.5, metalness: 0.3 });
-        const glass = new THREE.MeshStandardMaterial({ color: 0x1a2a3a, roughness: 0.15, metalness: 0.7 });
-        const L = def.length;
-        const W = def.width;
-        const isVan = def.id === 'cargoMule' || def.id === 'enforcer';
-        const bodyH = isVan ? 1.9 : 0.62;
-        const bodyY = isVan ? 1.15 : 0.55;
-        const body = new THREE.Mesh(new THREE.BoxGeometry(W, bodyH, L), paint);
-        body.position.y = bodyY;
-        body.castShadow = true;
-        g.add(body);
-        if (!isVan) {
-            const cabin = new THREE.Mesh(new THREE.BoxGeometry(W * 0.86, 0.55, L * 0.42), glass);
-            cabin.position.set(0, bodyY + bodyH / 2 + 0.24, -L * 0.06);
-            cabin.castShadow = true;
-            g.add(cabin);
-            const hood = new THREE.Mesh(new THREE.BoxGeometry(W * 0.9, 0.12, L * 0.2), paint);
-            hood.position.set(0, bodyY + bodyH / 2 + 0.04, L * 0.36);
-            g.add(hood);
-            if (def.id === 'solmarGT') {
-                const spoiler = new THREE.Mesh(new THREE.BoxGeometry(W * 0.9, 0.06, 0.3), dark);
-                spoiler.position.set(0, bodyY + bodyH / 2 + 0.28, -L * 0.46);
-                g.add(spoiler);
-            }
-        }
-        else {
-            const stripe = new THREE.Mesh(new THREE.BoxGeometry(W + 0.02, 0.3, L * 0.9), dark);
-            stripe.position.set(0, 1.1, 0);
-            g.add(stripe);
-        }
-        // Wheels.
-        const wheelGeo = new THREE.CylinderGeometry(0.36, 0.36, 0.26, 12);
-        const wheelMat = new THREE.MeshStandardMaterial({ color: 0x0e0f11, roughness: 0.9 });
-        const positions = [
-            [-W / 2 + 0.1, L * 0.32], [W / 2 - 0.1, L * 0.32],
-            [-W / 2 + 0.1, -L * 0.32], [W / 2 - 0.1, -L * 0.32],
-        ];
-        for (const [wx, wz] of positions) {
-            const wheel = new THREE.Mesh(wheelGeo, wheelMat);
-            wheel.rotation.z = Math.PI / 2;
-            wheel.position.set(wx, 0.36, wz);
-            wheel.castShadow = true;
-            g.add(wheel);
-            this.wheels.push(wheel);
-        }
-        // Headlights and taillights.
-        const headMat = new THREE.MeshStandardMaterial({ color: 0xfff2c0, emissive: 0xffedb0, emissiveIntensity: 0.9 });
-        for (const hx of [-W / 2 + 0.3, W / 2 - 0.3]) {
-            const hl = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.14, 0.06), headMat);
-            hl.position.set(hx, bodyY + 0.05, L / 2 + 0.02);
-            g.add(hl);
-        }
-        const tailMat = new THREE.MeshStandardMaterial({ color: 0x881111, emissive: 0xcc2222, emissiveIntensity: 0.7 });
-        for (const hx of [-W / 2 + 0.3, W / 2 - 0.3]) {
-            const tl = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.12, 0.06), tailMat);
-            tl.position.set(hx, bodyY + 0.05, -L / 2 - 0.02);
-            g.add(tl);
-        }
-        // Police lightbar.
-        if (def.police) {
-            const barBase = new THREE.Mesh(new THREE.BoxGeometry(W * 0.7, 0.1, 0.3), dark);
-            barBase.position.set(0, bodyY + bodyH / 2 + (isVan ? 0.1 : 0.62), -L * 0.05);
-            g.add(barBase);
-            const red = new THREE.MeshStandardMaterial({ color: 0xcc1111, emissive: 0xff2222, emissiveIntensity: 2 });
-            const blue = new THREE.MeshStandardMaterial({ color: 0x1111cc, emissive: 0x2244ff, emissiveIntensity: 2 });
-            this.lightbarL = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.12, 0.28), red);
-            this.lightbarL.position.set(-W * 0.18, barBase.position.y + 0.1, -L * 0.05);
-            this.lightbarR = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.12, 0.28), blue);
-            this.lightbarR.position.set(W * 0.18, barBase.position.y + 0.1, -L * 0.05);
-            g.add(this.lightbarL);
-            g.add(this.lightbarR);
-        }
-        void rng;
-        return g;
+    // wheels
+    const wheelGeo = new THREE.CylinderGeometry(0.36, 0.36, 0.28, 12);
+    wheelGeo.rotateZ(Math.PI / 2);
+    const wheelMat = new THREE.MeshStandardMaterial({ color: 0x141414, roughness: 0.9 });
+    const wheels = [];
+    for (const [wx, wz] of [[-W / 2 + 0.12, L / 2 - 0.85], [W / 2 - 0.12, L / 2 - 0.85], [-W / 2 + 0.12, -L / 2 + 0.85], [W / 2 - 0.12, -L / 2 + 0.85]]) {
+        const w = new THREE.Mesh(wheelGeo, wheelMat);
+        w.position.set(wx, 0.36, wz);
+        w.castShadow = true;
+        group.add(w);
+        wheels.push(w);
+    }
+    // police lightbar
+    const lightbar = [];
+    if (spec.kind === 'police' || spec.kind === 'interceptor' || spec.kind === 'swat') {
+        const red = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.16, 0.3), new THREE.MeshStandardMaterial({ color: 0xcc1111, emissive: 0xff2222, emissiveIntensity: 1.5 }));
+        red.position.set(-0.3, H * 0.42 + cabinH + H * 0.18 + 0.1, -L * 0.06);
+        group.add(red);
+        const blue = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.16, 0.3), new THREE.MeshStandardMaterial({ color: 0x1111cc, emissive: 0x2244ff, emissiveIntensity: 1.5 }));
+        blue.position.set(0.3, H * 0.42 + cabinH + H * 0.18 + 0.1, -L * 0.06);
+        group.add(blue);
+        lightbar.push(red, blue);
+    }
+    // van box / swat armor
+    if (spec.kind === 'van' || spec.kind === 'swat') {
+        const box = new THREE.Mesh(new THREE.BoxGeometry(W * 0.96, H * 0.55, L * 0.62), bodyMat);
+        box.position.set(0, H * 0.42 + H * 0.28, -L * 0.14);
+        box.castShadow = true;
+        group.add(box);
+    }
+    return { group, wheels, lightbar, body };
+}
+export class Vehicle {
+    // Deterministic clock (ms) set by the game loop each frame. The lightbar
+    // flash reads this instead of performance.now() so renders are identical.
+    static clockMs = 0;
+    spec;
+    group;
+    wheels;
+    lightbar;
+    x = 0;
+    z = 0;
+    heading = 0;
+    vx = 0;
+    vz = 0;
+    hp;
+    dead = false;
+    driftTime = 0;
+    smokeTimer = 0;
+    steerVis = 0;
+    rollVis = 0;
+    pitchVis = 0;
+    onExplode = null;
+    constructor(specKey, bodyColor) {
+        this.spec = VEHICLES[specKey];
+        const built = buildVehicleMesh(this.spec, bodyColor);
+        this.group = built.group;
+        this.wheels = built.wheels;
+        this.lightbar = built.lightbar;
+        this.hp = this.spec.hp;
+    }
+    get speed() {
+        return Math.hypot(this.vx, this.vz);
+    }
+    get forwardSpeed() {
+        return this.vx * Math.sin(this.heading) + this.vz * Math.cos(this.heading);
+    }
+    get mph() {
+        return Math.abs(this.speed) * 2.237;
     }
     get radius() {
-        return Math.max(this.def.length, this.def.width) * 0.42;
-    }
-    recolor(hex) {
-        if (this.paintMat)
-            this.paintMat.color.setHex(hex);
-    }
-    get forward() {
-        return new THREE.Vector3(Math.sin(this.heading), 0, Math.cos(this.heading));
+        return this.spec.length * 0.48;
     }
     place(x, z, heading) {
-        this.pos.set(x, 0, z);
+        this.x = x;
+        this.z = z;
         this.heading = heading;
-        this.speed = 0;
-        this.group.position.copy(this.pos);
-        this.group.rotation.y = heading;
+        this.vx = 0;
+        this.vz = 0;
+        this.syncMesh(0);
     }
     damage(amount) {
-        if (this.exploded)
-            return;
+        if (this.dead)
+            return false;
         this.hp -= amount;
         if (this.hp <= 0) {
             this.hp = 0;
-            this.exploded = true;
+            this.dead = true;
             if (this.onExplode)
                 this.onExplode(this);
+            return true;
         }
+        return false;
     }
-    update(dt, input, city) {
-        if (this.exploded)
+    repair() {
+        this.hp = this.spec.hp;
+        this.dead = false;
+    }
+    update(dt, input, city, others) {
+        if (this.dead)
             return;
-        const def = this.def;
-        // Steering: less authority at high speed, more while drifting.
-        const steerTarget = input.steer * def.grip * (input.drift ? 1.35 : 1);
-        const speedFactor = clamp(1 - Math.abs(this.speed) / (def.topSpeed * 1.4), 0.25, 1);
-        this.steerAngle = lerp(this.steerAngle, steerTarget * speedFactor, 1 - Math.exp(-8 * dt));
-        const moving = Math.abs(this.speed) > 0.5;
-        if (moving) {
-            this.heading += this.steerAngle * (this.speed / def.topSpeed) * dt * (this.speed < 0 ? -1 : 1) * 1.9;
+        const spec = this.spec;
+        const fwdX = Math.sin(this.heading);
+        const fwdZ = Math.cos(this.heading);
+        const fSpeed = this.forwardSpeed;
+        // engine + brake
+        let accel = 0;
+        if (input.throttle > 0)
+            accel = spec.accel * input.throttle;
+        else if (input.throttle < 0)
+            accel = spec.accel * 0.7 * input.throttle;
+        if (input.brake) {
+            accel = fSpeed > 0.5 ? -spec.accel * 1.4 : spec.accel * 0.7 * -1;
         }
-        // Longitudinal physics.
-        if (input.throttle > 0) {
-            this.speed += def.accel * input.throttle * dt * (1 - this.speed / def.topSpeed);
+        const newFSpeed = clamp(fSpeed + accel * dt, -12, spec.topSpeed);
+        // steering: stronger at low speed, reversed when reversing
+        const steerTarget = input.steer * spec.turn * clamp(Math.abs(fSpeed) / 8, 0, 1) * (fSpeed >= 0 ? 1 : -1);
+        this.heading += steerTarget * dt;
+        this.steerVis = clamp(this.steerVis + (input.steer * 0.42 - this.steerVis) * Math.min(1, dt * 10), -0.42, 0.42);
+        // velocity: keep most of the forward speed, decay lateral slide by grip
+        const nFwdX = Math.sin(this.heading);
+        const nFwdZ = Math.cos(this.heading);
+        const latX = this.vx - fwdX * fSpeed;
+        const latZ = this.vz - fwdZ * fSpeed;
+        const grip = input.drift && Math.abs(fSpeed) > 10 ? 1.1 : 5.5;
+        const latDecay = Math.exp(-grip * dt);
+        this.vx = nFwdX * newFSpeed + latX * latDecay;
+        this.vz = nFwdZ * newFSpeed + latZ * latDecay;
+        if (input.drift && Math.abs(fSpeed) > 12)
+            this.driftTime += dt;
+        else
+            this.driftTime = 0;
+        // drag
+        const drag = Math.exp(-0.12 * dt);
+        this.vx *= drag;
+        this.vz *= drag;
+        // integrate
+        const px = this.x;
+        const pz = this.z;
+        this.x += this.vx * dt;
+        this.z += this.vz * dt;
+        // water blocks the car
+        if (isWater(this.x, this.z)) {
+            this.x = px;
+            this.z = pz;
+            this.vx *= -0.3;
+            this.vz *= -0.3;
         }
-        else if (input.throttle < 0) {
-            if (this.speed > 0.5) {
-                this.speed += def.brake * input.throttle * dt; // braking
+        // building collision: push out, kill inward velocity, damage on hard hits
+        const before = this.speed;
+        const hit = city.collideCircle(this.x, this.z, this.radius);
+        if (hit.hit) {
+            const nx = hit.x - this.x;
+            const nz = hit.z - this.z;
+            this.x = hit.x;
+            this.z = hit.z;
+            const into = this.vx * nx + this.vz * nz;
+            if (into < 0) {
+                this.vx -= nx * into * 1.4;
+                this.vz -= nz * into * 1.4;
             }
-            else {
-                this.speed += def.accel * 0.55 * input.throttle * dt; // reverse
-                this.speed = Math.max(this.speed, -12);
+            if (before > 14)
+                this.damage((before - 14) * 1.2);
+        }
+        // car-car collisions
+        for (const o of others) {
+            if (o === this || o.dead)
+                continue;
+            const dx = this.x - o.x;
+            const dz = this.z - o.z;
+            const rr = this.radius + o.radius;
+            const d2 = dx * dx + dz * dz;
+            if (d2 < rr * rr && d2 > 0.0001) {
+                const d = Math.sqrt(d2);
+                const push = (rr - d) / 2;
+                const ux = dx / d;
+                const uz = dz / d;
+                this.x += ux * push;
+                this.z += uz * push;
+                o.x -= ux * push;
+                o.z -= uz * push;
+                const rel = (this.vx - o.vx) * ux + (this.vz - o.vz) * uz;
+                if (rel > 0) {
+                    this.vx -= ux * rel * 0.6;
+                    this.vz -= uz * rel * 0.6;
+                    o.vx += ux * rel * 0.6;
+                    o.vz += uz * rel * 0.6;
+                    if (rel > 10) {
+                        this.damage(rel * 0.5);
+                        o.damage(rel * 0.5);
+                    }
+                }
             }
         }
-        else {
-            this.speed -= Math.sign(this.speed) * Math.min(Math.abs(this.speed), 6 * dt);
-        }
-        // Drift: extra lateral slide, handled visually by yaw offset and skid.
-        const fwd = this.forward;
-        const prevX = this.pos.x;
-        const prevZ = this.pos.z;
-        this.pos.x += fwd.x * this.speed * dt;
-        this.pos.z += fwd.z * this.speed * dt;
-        if (city.isWater(this.pos.x, this.pos.z)) {
-            this.pos.x = prevX;
-            this.pos.z = prevZ;
-            this.speed *= 0.4;
-        }
-        city.resolveCircle(this.pos, this.radius);
-        // Suspension pitch and roll (visual only).
-        const accelPitch = clamp(-input.throttle * 0.03, -0.05, 0.05);
-        const roll = clamp(-this.steerAngle * 0.03 * (Math.abs(this.speed) / def.topSpeed), -0.06, 0.06);
-        this.body.rotation.x = lerp(this.body.rotation.x, accelPitch, 1 - Math.exp(-6 * dt));
-        this.body.rotation.z = lerp(this.body.rotation.z, roll, 1 - Math.exp(-6 * dt));
-        if (input.drift && moving) {
-            this.body.rotation.y = lerp(this.body.rotation.y, -this.steerAngle * 0.12, 1 - Math.exp(-8 * dt));
-        }
-        else {
-            this.body.rotation.y = lerp(this.body.rotation.y, 0, 1 - Math.exp(-8 * dt));
-        }
-        // Wheel spin.
-        for (const w of this.wheels)
-            w.rotation.x += (this.speed / 0.36) * dt;
-        this.group.position.copy(this.pos);
+        this.syncMesh(dt);
+    }
+    syncMesh(dt) {
+        this.group.position.set(this.x, 0, this.z);
         this.group.rotation.y = this.heading;
-        // Damage smoke and fire.
-        const hpRatio = this.hp / def.hp;
-        if (hpRatio < 0.5 && this.onSmoke) {
-            this.smokeTimer -= dt;
-            if (this.smokeTimer <= 0) {
-                this.smokeTimer = hpRatio < 0.2 ? 0.05 : 0.16;
-                const p = this.pos.clone();
-                p.y = 1.2;
-                this.onSmoke(p, hpRatio < 0.2);
-            }
+        const fSpeed = this.forwardSpeed;
+        // body roll into corners, pitch under accel
+        const targetRoll = -this.steerVis * clamp(Math.abs(fSpeed) / 30, 0, 1) * 0.09;
+        const targetPitch = clamp(-fSpeed * 0.0012, -0.03, 0.03);
+        this.rollVis = lerp(this.rollVis, targetRoll, Math.min(1, dt * 8 + 0.001));
+        this.pitchVis = lerp(this.pitchVis, targetPitch, Math.min(1, dt * 8 + 0.001));
+        this.group.rotation.z = this.rollVis;
+        this.group.rotation.x = this.pitchVis;
+        // wheels spin + front steer
+        const spin = (fSpeed / 0.36) * dt;
+        this.wheels.forEach((w, i) => {
+            w.rotation.x += spin;
+            if (i < 2)
+                w.rotation.y = this.steerVis;
+        });
+        // lightbar flash (deterministic: driven by the game's clock)
+        if (this.lightbar.length === 2) {
+            const phase = Math.floor(Vehicle.clockMs / 280) % 2;
+            this.lightbar[0].material.emissiveIntensity = phase === 0 ? 2.2 : 0.15;
+            this.lightbar[1].material.emissiveIntensity = phase === 1 ? 2.2 : 0.15;
         }
-        if (this.def.police) {
-            this.flashT += dt;
-            const on = Math.floor(this.flashT * 4) % 2 === 0;
-            if (this.lightbarL && this.lightbarR) {
-                this.lightbarL.material.emissiveIntensity = on ? 3 : 0.2;
-                this.lightbarR.material.emissiveIntensity = on ? 0.2 : 3;
-            }
-        }
-        void this.fireTimer;
-    }
-    get drifting() {
-        return Math.abs(this.steerAngle) > 1.4 && Math.abs(this.speed) > 14;
-    }
-    dispose(scene) {
-        scene.remove(this.group);
     }
 }
-export function makeVehicle(defId, scene, rng) {
-    const def = VEHICLES[defId];
-    if (!def)
-        throw new Error('unknown vehicle ' + defId);
-    return new Vehicle(def, scene, rng);
+function lerp(a, b, t) {
+    return a + (b - a) * t;
 }

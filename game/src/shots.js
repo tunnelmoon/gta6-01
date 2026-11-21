@@ -1,62 +1,113 @@
-export function setupShot(game, kind) {
-    game.shotMode = true;
-    game.shotFrames = 0;
-    if (kind === 'start') {
-        // Title screen over the living city: nothing to set up.
-        return;
-    }
-    // Gameplay shots bypass newGame(), which is what normally unhides the
-    // live HUD (boot leaves #hud-live display:none), so unhide it here.
-    game.hud.setHudVisible(true);
-    if (kind === 'play') {
-        game.debugDrive = true;
-        game.state = 'playing';
-        game.hud.hideMenus();
-        game.player.teleport(0, 120);
-        game.player.heading = Math.PI;
-        const v = game.spawnShotVehicle('solmarGT', 0, 120, Math.PI);
-        game.shotEnterVehicle(v);
-        game.player.cash = 1750;
-        game.police.heat = 40;
-        game.rig.yaw = Math.PI;
-        game.rig.pitch = 0.3;
-        game.rig.snapTo(game.player.pos);
-        return;
-    }
-    if (kind === 'combat') {
-        game.state = 'playing';
-        game.hud.hideMenus();
-        game.player.teleport(618, -158);
-        game.player.heading = 2.46;
-        game.combat.unlock('kestrel');
-        game.combat.select('kestrel');
-        game.player.setWeapon('kestrel');
-        game.missions.startMission(0);
-        game.skipCutscene();
-        game.missions.debugJumpToStep(1);
-        game.debugAim = true;
-        game.rig.yaw = 2.46;
-        game.rig.pitch = 0.22;
-        game.rig.snapTo(game.player.pos);
-        game.player.cash = 250;
-        return;
-    }
-    if (kind === 'end') {
-        game.state = 'playing';
-        game.hud.hideMenus();
-        game.missions.storyComplete = true;
-        game.missions.discount = true;
-        game.missions.current = 3;
-        game.player.cash = 52000;
-        game.player.health = 100;
-        game.player.armor = 100;
-        game.player.teleport(766, 246);
-        game.player.heading = 2.2;
-        game.spawnShotVehicle('solmarGT', 752, 252, 2.2);
-        game.city.setTimeOfDay('sunset');
-        game.rig.yaw = 2.2;
-        game.rig.pitch = 0.28;
-        game.rig.snapTo(game.player.pos);
-        return;
-    }
+export const SHOT_CONFIGS = {
+    start: {
+        shot: 'start',
+        title: 'Title screen',
+        objectiveTitle: '',
+        objectiveStep: '',
+        objectiveDist: 0,
+        playerX: -540,
+        playerZ: 80,
+        playerHeading: Math.PI,
+        cameraYaw: 0,
+        inCar: false,
+        carKey: null,
+        carX: 0,
+        carZ: 0,
+        carHeading: 0,
+        carColor: 0,
+        wantedHeat: 0,
+        policeAt: [],
+        guards: [],
+        cash: 250,
+        weaponSlot: 1,
+        timeOfDay: 0.62,
+        frames: 150,
+    },
+    play: {
+        shot: 'play',
+        title: 'Open-world driving',
+        objectiveTitle: 'Salt and Ignition - 1 of 4',
+        objectiveStep: 'Deliver the GT to Voss Customs',
+        objectiveDist: 420,
+        playerX: 0,
+        playerZ: 140,
+        playerHeading: Math.PI,
+        cameraYaw: Math.PI,
+        inCar: true,
+        carKey: 'solmarGT',
+        carX: 0,
+        carZ: 140,
+        carHeading: Math.PI,
+        carColor: 0xc0c8d0,
+        wantedHeat: 45,
+        policeAt: [
+            { x: 40, z: 90 },
+            { x: -40, z: 190 },
+        ],
+        guards: [],
+        cash: 1750,
+        weaponSlot: 2,
+        timeOfDay: 0.62,
+        frames: 150,
+    },
+    combat: {
+        shot: 'combat',
+        title: 'Mission combat',
+        objectiveTitle: 'Salt and Ignition - 1 of 4',
+        objectiveStep: 'Deal with the 3 lot guards',
+        objectiveDist: 14,
+        playerX: 632,
+        playerZ: -172,
+        playerHeading: Math.PI * 0.75,
+        cameraYaw: Math.PI * 0.75,
+        inCar: false,
+        carKey: 'solmarGT',
+        carX: 641,
+        carZ: -182,
+        carHeading: Math.PI / 2,
+        carColor: 0xc0c8d0,
+        wantedHeat: 0,
+        policeAt: [],
+        guards: [
+            { x: 635, z: -180, hp: 60 },
+            { x: 636, z: -176, hp: 60 },
+            { x: 640, z: -176, hp: 60 },
+        ],
+        cash: 250,
+        weaponSlot: 4,
+        timeOfDay: 0.62,
+        frames: 150,
+    },
+    end: {
+        shot: 'end',
+        title: 'Ending at the marina',
+        objectiveTitle: 'Solmar Sunset - Story Complete',
+        objectiveStep: 'Free Roam - Solmar is yours',
+        objectiveDist: 0,
+        playerX: 810,
+        playerZ: 260,
+        playerHeading: Math.PI / 2,
+        cameraYaw: Math.PI / 2,
+        inCar: false,
+        carKey: 'solmarGT',
+        carX: 812,
+        carZ: 267,
+        carHeading: Math.PI * 0.85,
+        carColor: 0xc0c8d0,
+        wantedHeat: 0,
+        policeAt: [],
+        guards: [],
+        cash: 52000,
+        weaponSlot: 2,
+        timeOfDay: 0.66,
+        frames: 150,
+    },
+};
+export function parseShotParams() {
+    const params = new URLSearchParams(window.location.search);
+    const shot = params.get('shot');
+    if (!shot)
+        return null;
+    const seed = Number(params.get('seed') ?? '1');
+    return { shot, seed: Number.isFinite(seed) ? seed : 1 };
 }

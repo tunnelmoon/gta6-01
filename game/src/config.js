@@ -1,114 +1,7 @@
-// Solmar Sunset - central configuration: world layout, districts, key
-// locations, vehicle and weapon definitions, economy. Every coordinate in
-// the brief lives here so missions, HUD and the minimap all agree.
-import * as THREE from 'three';
-export const WORLD = {
-    minX: -900,
-    maxX: 900,
-    minZ: -980,
-    maxZ: 900,
-    roadHalfWidth: 7,
-    sidewalk: 3.5,
-    blockMargin: 11,
-};
-export const AVENUES = [-800, -640, -480, -320, -160, 0, 160, 320, 480, 640, 800];
-export const STREETS = [-880, -720, -560, -400, -240, -80, 80, 240, 400, 560, 720, 840];
-export const CAYO_AVENUES = [-160, 0, 160, 320];
-export const CAYO_STREETS = [-880, -720, -560];
-export const CHANNEL = { north: -430, south: -510 };
-export const DISTRICTS = [
-    { id: 'centro', name: 'Centro Solmar', minX: -320, maxX: 320, minZ: -380, maxZ: 360, minH: 22, maxH: 88, palette: [0xe8dcc8, 0xd9c7a7, 0xc9b8a3, 0xb8c4cc, 0xe0cfae] },
-    { id: 'playa', name: 'Playa Dorado', minX: 350, maxX: 850, minZ: -350, maxZ: 350, minH: 8, maxH: 24, palette: [0xf2c9a4, 0xf7d9c4, 0xf5e6c8, 0xd9e8e4, 0xeeb9b0] },
-    { id: 'barrio', name: 'Barrio Cobre', minX: -850, maxX: -350, minZ: -300, maxZ: 350, minH: 8, maxH: 18, palette: [0xd9a066, 0xc98a5a, 0xe0b184, 0xb5774a, 0xdba67e] },
-    { id: 'puerto', name: 'Puerto Viejo', minX: -400, maxX: 450, minZ: 400, maxZ: 850, minH: 8, maxH: 16, palette: [0x9aa0a3, 0x8a8f92, 0xb0a89c, 0x7d838a, 0xa89a86] },
-    { id: 'cayo', name: 'Cayo Verde', minX: -250, maxX: 350, minZ: -950, maxZ: -520, minH: 10, maxH: 30, palette: [0xe6e2d4, 0xf0e9d8, 0xd8e2d4, 0xe8d8c0, 0xcfd8dc] },
-];
-export function districtAt(x, z) {
-    for (const d of DISTRICTS) {
-        if (x >= d.minX && x <= d.maxX && z >= d.minZ && z <= d.maxZ)
-            return d;
-    }
-    if (z < -430 && z > -510)
-        return DISTRICTS[4];
-    return DISTRICTS[0];
-}
-// Key locations from the brief (Three.js coords: +X east, -Z north).
-export const LOC = {
-    elFaroBar: { x: -540, z: 80 },
-    vossCustoms: { x: -460, z: -140 },
-    smpdHq: { x: 110, z: -60 },
-    solmarArmory: { x: -120, z: 80 },
-    safehouseMotel: { x: 520, z: 140 },
-    vipLot: { x: 640, z: -180 },
-    marina: { x: 780, z: 260 },
-    portGate: { x: -60, z: 480 },
-    containerYard: { x: 180, z: 660 },
-    pier4: { x: 240, z: 740 },
-    bridgeSouth: { x: 0, z: -410 },
-    bridgeNorth: { x: 0, z: -510 },
-    compoundGate: { x: 120, z: -720 },
-    penthouseTerrace: { x: 120, z: -780 },
-    vault: { x: 125, z: -805 },
-    getawayGt: { x: 95, z: -750 },
-    centralPlaza: { x: 0, z: 0 },
-};
-export const VEHICLES = {
-    solmarGT: { id: 'solmarGT', name: 'Solmar GT', color: 0xc0c8d0, length: 4.6, width: 1.9, topSpeed: 52, accel: 22, brake: 34, grip: 2.6, hp: 120, seats: 2, police: false },
-    v8Dorado: { id: 'v8Dorado', name: 'V8 Dorado', color: 0xd8542e, length: 4.9, width: 2.0, topSpeed: 47, accel: 19, brake: 30, grip: 2.2, hp: 140, seats: 2, police: false },
-    metroCruiser: { id: 'metroCruiser', name: 'Metro Cruiser', color: 0x1c2a4a, length: 4.9, width: 2.0, topSpeed: 48, accel: 19, brake: 32, grip: 2.4, hp: 150, seats: 4, police: true },
-    interceptor: { id: 'interceptor', name: 'SMPD Interceptor', color: 0x101828, length: 4.7, width: 1.95, topSpeed: 56, accel: 24, brake: 36, grip: 2.8, hp: 150, seats: 2, police: true },
-    urbanSedan: { id: 'urbanSedan', name: 'Urban Sedan', color: 0x7a8a99, length: 4.7, width: 1.9, topSpeed: 40, accel: 14, brake: 28, grip: 2.0, hp: 100, seats: 4, police: false },
-    cargoMule: { id: 'cargoMule', name: 'Cargo Mule', color: 0x4a5a68, length: 6.2, width: 2.3, topSpeed: 34, accel: 11, brake: 24, grip: 1.6, hp: 200, seats: 2, police: false },
-    enforcer: { id: 'enforcer', name: 'Tactical Enforcer', color: 0x232a33, length: 6.4, width: 2.4, topSpeed: 38, accel: 13, brake: 26, grip: 1.8, hp: 260, seats: 4, police: true },
-};
-export const WEAPONS = [
-    { id: 'melee', name: 'Fists', damage: 18, fireRate: 2.2, mag: 0, maxReserve: 0, range: 2.2, price: 0, auto: false },
-    { id: 'kestrel', name: 'Kestrel 9mm', damage: 22, fireRate: 4.5, mag: 15, maxReserve: 120, range: 55, price: 0, auto: false },
-    { id: 'viper', name: 'Viper Micro-SMG', damage: 14, fireRate: 11, mag: 32, maxReserve: 224, range: 42, price: 1200, auto: true },
-    { id: 'bulldog', name: 'Bulldog Carbine', damage: 34, fireRate: 7, mag: 30, maxReserve: 180, range: 90, price: 2800, auto: true },
-];
-export const ECONOMY = {
-    startCash: 250,
-    respawnCost: 100,
-    resprayCost: 200,
-    armorCost: 500,
-    armorValue: 100,
-    ammoCost: 100,
-    pedCashMin: 15,
-    pedCashMax: 60,
-    storyDiscount: 0.5,
-};
-export const PLAYER = {
-    walkSpeed: 5.2,
-    sprintSpeed: 9.0,
-    aimSpeed: 2.6,
-    radius: 0.45,
-    height: 1.8,
-    maxHealth: 100,
-    maxArmor: 100,
-};
-export const WANTED = {
-    decayPerSecond: 6,
-    heatPerKill: 26,
-    heatPerCopKill: 40,
-    heatPerShotNearPolice: 8,
-    heatPerSteal: 18,
-    maxHeat: 100,
-};
-export const PALETTE = {
-    amber: 0xffb347,
-    amberCss: '#ffb347',
-    teal: 0x2fd4c4,
-    tealCss: '#2fd4c4',
-    armorBlue: 0x4aa8ff,
-    armorBlueCss: '#4aa8ff',
-    coral: 0xff6b4a,
-    sun: 0xffd27a,
-    skyDay: 0x8ecae6,
-    skySunset: 0xff9e5e,
-    skyNight: 0x0e1a2e,
-    fogSunset: 0xf2a56b,
-};
+// Solmar Sunset - shared tuning, world layout, mission data.
+// Every coordinate and number the game uses lives here so the systems
+// stay in agreement about where things are.
+// ---- math helpers (clamp's upper branch returns the max, always) ----
 export function clamp(v, min, max) {
     if (v < min)
         return min;
@@ -119,11 +12,11 @@ export function clamp(v, min, max) {
 export function lerp(a, b, t) {
     return a + (b - a) * t;
 }
-export function angleLerp(a, b, t) {
-    let d = b - a;
-    while (d > Math.PI)
+export function lerpAngle(a, b, t) {
+    let d = (b - a) % (Math.PI * 2);
+    if (d > Math.PI)
         d -= Math.PI * 2;
-    while (d < -Math.PI)
+    if (d < -Math.PI)
         d += Math.PI * 2;
     return a + d * t;
 }
@@ -132,4 +25,232 @@ export function dist2d(ax, az, bx, bz) {
     const dz = az - bz;
     return Math.sqrt(dx * dx + dz * dz);
 }
-export const UP = new THREE.Vector3(0, 1, 0);
+export function angleTo(ax, az, bx, bz) {
+    return Math.atan2(bx - ax, bz - az);
+}
+// ---- world bounds ----
+export const WORLD = {
+    minX: -900,
+    maxX: 900,
+    minZ: -1000,
+    maxZ: 900,
+    roadWidth: 14,
+    sidewalk: 4,
+};
+// Vertical roads (along Z) and horizontal roads (along X), mainland grid.
+export const MAIN_ROADS_X = [-720, -600, -480, -360, -240, -120, 0, 120, 240, 360, 480, 600, 720];
+export const MAIN_ROADS_Z = [-360, -240, -120, 0, 120, 240, 360, 480, 600, 720, 840];
+// Cayo Verde island roads.
+export const ISLAND_ROADS_X = [-120, 0, 120, 240];
+export const ISLAND_ROADS_Z = [-840, -720, -600];
+// Water: ocean east of X 850, south of Z 850, the channel, and around the island.
+export function isWater(x, z) {
+    if (x > 850 || z > 850)
+        return true;
+    if (z < -430 && z > -510)
+        return Math.abs(x) > 9; // channel, bridge corridor stays dry
+    if (z <= -510 && z >= -950) {
+        if (x < -250 || x > 350)
+            return true;
+        return false;
+    }
+    if (z < -950)
+        return true;
+    return false;
+}
+export function isOnLand(x, z) {
+    return !isWater(x, z);
+}
+export const DISTRICTS = [
+    { name: 'Centro Solmar', minX: -320, maxX: 320, minZ: -380, maxZ: 360 },
+    { name: 'Playa Dorado', minX: 350, maxX: 850, minZ: -350, maxZ: 350 },
+    { name: 'Barrio Cobre', minX: -850, maxX: -350, minZ: -300, maxZ: 350 },
+    { name: 'Puerto Viejo', minX: -400, maxX: 450, minZ: 400, maxZ: 850 },
+    { name: 'Cayo Verde', minX: -250, maxX: 350, minZ: -950, maxZ: -520 },
+];
+export function districtAt(x, z) {
+    for (const d of DISTRICTS) {
+        if (x >= d.minX && x <= d.maxX && z >= d.minZ && z <= d.maxZ)
+            return d.name;
+    }
+    return 'Solmar';
+}
+// ---- named places (world bible coordinates) ----
+export const PLACES = {
+    centralPlaza: { x: 0, z: 0 },
+    smpdHQ: { x: 110, z: -60 },
+    armory: { x: -120, z: 80 },
+    safehouse: { x: 520, z: 140 },
+    vipLot: { x: 640, z: -180 },
+    marina: { x: 780, z: 260 },
+    elFaro: { x: -540, z: 80 },
+    vossCustoms: { x: -460, z: -140 },
+    portGate: { x: -60, z: 480 },
+    containerYard: { x: 180, z: 660 },
+    pier4: { x: 240, z: 740 },
+    bridgeSouth: { x: 0, z: -410 },
+    bridgeNorth: { x: 0, z: -510 },
+    compoundGate: { x: 120, z: -720 },
+    terrace: { x: 120, z: -780 },
+    vault: { x: 125, z: -805 },
+};
+export const VEHICLES = {
+    solmarGT: { name: 'Solmar GT', length: 4.6, width: 2.0, height: 1.15, topSpeed: 52, accel: 16, turn: 1.9, hp: 100, body: 0xc0c8d0, trim: 0x22242a, kind: 'sports' },
+    v8Dorado: { name: 'V8 Dorado', length: 5.0, width: 2.1, height: 1.3, topSpeed: 46, accel: 14, turn: 1.6, hp: 120, body: 0x8a2a20, trim: 0x1a1a1a, kind: 'muscle' },
+    cruiser: { name: 'Metro Cruiser', length: 5.0, width: 2.05, height: 1.45, topSpeed: 44, accel: 13, turn: 1.7, hp: 140, body: 0x1c2a3a, trim: 0xe8e8e8, kind: 'police' },
+    interceptor: { name: 'SMPD Interceptor', length: 4.8, width: 2.0, height: 1.3, topSpeed: 56, accel: 18, turn: 2.0, hp: 130, body: 0x101418, trim: 0xd8d8d8, kind: 'interceptor' },
+    sedan: { name: 'Urban Sedan', length: 4.7, width: 1.95, height: 1.4, topSpeed: 38, accel: 10, turn: 1.7, hp: 90, body: 0x6a7a8a, trim: 0x2a2a2a, kind: 'sedan' },
+    cargoMule: { name: 'Cargo Mule', length: 6.2, width: 2.4, height: 2.6, topSpeed: 34, accel: 8, turn: 1.3, hp: 200, body: 0x4a4a48, trim: 0xd8c23a, kind: 'van' },
+    enforcer: { name: 'Tactical Enforcer', length: 6.4, width: 2.6, height: 2.9, topSpeed: 36, accel: 9, turn: 1.25, hp: 260, body: 0x23282c, trim: 0x3a3a3a, kind: 'swat' },
+};
+export const TRAFFIC_MODELS = ['sedan', 'sedan', 'v8Dorado', 'sedan', 'solmarGT', 'cargoMule'];
+export const WEAPONS = [
+    { name: 'Fists', slot: 1, damage: 25, fireRate: 2.0, clip: Infinity, reserve: Infinity, range: 2.6, spread: 0, auto: false, price: 0, unlock: 0 },
+    { name: 'Kestrel 9mm', slot: 2, damage: 34, fireRate: 4.0, clip: 15, reserve: 120, range: 70, spread: 0.02, auto: false, price: 100, unlock: 1 },
+    { name: 'Viper Micro-SMG', slot: 3, damage: 22, fireRate: 10.0, clip: 32, reserve: 192, range: 55, spread: 0.05, auto: true, price: 1200, unlock: 2 },
+    { name: 'Bulldog Carbine', slot: 4, damage: 55, fireRate: 6.0, clip: 30, reserve: 180, range: 110, spread: 0.012, auto: true, price: 2800, unlock: 3 },
+];
+// ---- economy ----
+export const ECONOMY = {
+    startCash: 250,
+    respawnFee: 100,
+    resprayCost: 200,
+    armorCost: 500,
+    armorValue: 100,
+    ammoCost: 100,
+    pedCashMin: 15,
+    pedCashMax: 60,
+    discountAfterStory: 0.5,
+};
+// ---- player tuning ----
+export const PLAYER_TUNE = {
+    walkSpeed: 4.2,
+    sprintSpeed: 7.2,
+    accel: 30,
+    radius: 0.55,
+    health: 100,
+    armorMax: 100,
+};
+// ---- wanted ----
+export const WANTED = {
+    heatPerKill: 18,
+    heatPerSteal: 10,
+    heatPerShot: 2,
+    decayPerSecond: 6,
+    unseenSecondsToCool: 4,
+    starsForHeat: [0, 25, 45, 65, 82, 95], // heat thresholds per star count
+    policePerStar: [0, 1, 2, 3, 4, 5],
+    visionRange: 70,
+    visionAngle: 1.25, // radians half-angle
+};
+export const MISSIONS = [
+    {
+        id: 1,
+        title: 'Salt and Ignition',
+        start: { x: -540, z: 100, label: 'El Faro Bar' },
+        intro: [
+            { speaker: 'Mateo', line: 'Two years off the grid, Mara, and Vespera Syndicate still remembers what your brother owed them. Tonight, they collect, unless we pay first.' },
+            { speaker: 'Mara', line: "I don't boost cars for free anymore, Mateo. Give me a name and a plate." },
+            { speaker: 'Mateo', line: "Silver Solmar GT parked at the Playa Dorado VIP lot. Clean keys, dirty owner. Drop it at Voss Customs before SMPD tags the plates." },
+        ],
+        outro: [
+            { speaker: 'Mateo', line: "Clean work, Voss. Keep the Kestrel 9mm I left in the glovebox, something tells me Vespera won't take this quietly." },
+        ],
+        reward: 1500,
+        steps: [
+            { kind: 'goto', text: 'Drive to the VIP lot in Playa Dorado', x: 640, z: -180, radius: 26 },
+            { kind: 'kill', text: 'Deal with the 3 lot guards', x: 640, z: -185, radius: 30, count: 3, hp: 60 },
+            { kind: 'steal', text: 'Steal the silver Solmar GT', x: 645, z: -185, radius: 6 },
+            { kind: 'deliver', text: 'Lose the heat, then deliver the GT to Voss Customs', x: -460, z: -140, radius: 30 },
+        ],
+    },
+    {
+        id: 2,
+        title: 'Harbor Static',
+        start: { x: -460, z: -140, label: 'Voss Customs' },
+        intro: [
+            { speaker: 'Mateo', line: "Mara, we got burned! Vespera tracked the coupe's transponder and raided my stash at Puerto Viejo docks." },
+            { speaker: 'Mara', line: "Tell me they didn't get the ledger drives." },
+            { speaker: 'Mateo', line: 'Locked inside Pier 4 warehouse right now. Grab that drive before their freighter leaves port, and watch out, they brought heavy hardware.' },
+        ],
+        outro: [
+            { speaker: 'Mara', line: "I've got the drives, Mateo. Meet me at the motel, wait... Mateo? Answer your phone." },
+        ],
+        reward: 3500,
+        steps: [
+            { kind: 'goto', text: 'Drive to the Port Main Gate', x: -60, z: 480, radius: 26 },
+            { kind: 'kill', text: 'Clear the 8 Syndicate gunmen at the docks', x: 200, z: 690, radius: 90, count: 8, hp: 85 },
+            { kind: 'interact', text: 'Grab the Encrypted Ledger Case', x: 240, z: 740, radius: 6 },
+            { kind: 'steal', text: 'Hijack the armored Cargo Mule', x: 215, z: 755, radius: 7 },
+            { kind: 'deliver', text: 'Deliver the van to the Safehouse Motel', x: 520, z: 140, radius: 30 },
+        ],
+    },
+    {
+        id: 3,
+        title: 'Neon Ransom',
+        start: { x: 520, z: 158, label: 'Safehouse Motel' },
+        intro: [
+            { speaker: 'Vespera Lieutenant', line: "You want your little hacker back, Voss? Bring the ledger to Cayo Verde midnight, or we dump him off the North Bridge." },
+            { speaker: 'Mara', line: "They're moving him up Central Avenue right now. If they cross that bridge into Cayo Verde, he's dead." },
+        ],
+        outro: [
+            { speaker: 'Mateo', line: 'I cracked the ledger while tied up in the back of that van... fifty grand in bearer bonds sitting in their Cayo Verde penthouse vault.' },
+            { speaker: 'Mara', line: 'No more running. Tonight, we take Solmar.' },
+        ],
+        reward: 7500,
+        steps: [
+            { kind: 'convoy', text: 'Intercept the convoy heading north to the bridge', x: -120, z: -300, radius: 60 },
+            { kind: 'interact', text: 'Rescue Mateo from the stopped Transport Van', x: 0, z: -430, radius: 8 },
+            { kind: 'deliver', text: 'Respray the getaway car at Voss Customs', x: -460, z: -140, radius: 30 },
+        ],
+    },
+    {
+        id: 4,
+        title: 'Solmar Sunset',
+        start: { x: 0, z: -410, label: 'Coastal Bridge' },
+        intro: [
+            { speaker: 'Mateo', line: 'I looped their penthouse security cameras for ten minutes. Once you breach the courtyard, their private army will lock down the bridge.' },
+            { speaker: 'Mara', line: "Keep the boat engine running at Playa Dorado Marina. When I cross back over that bridge, I'm not coming empty-handed." },
+        ],
+        outro: [
+            { speaker: 'Mara', line: "The debt is paid, Mateo. And the rest of Solmar? It's wide open." },
+        ],
+        reward: 50000,
+        steps: [
+            { kind: 'goto', text: 'Cross the Coastal Bridge to Cayo Verde', x: 0, z: -510, radius: 22 },
+            { kind: 'kill', text: 'Breach the compound, defeat 12 elite guards', x: 120, z: -780, radius: 70, count: 12, hp: 110 },
+            { kind: 'kill', text: 'Take down the Vespera Underboss', x: 120, z: -780, radius: 40, count: 1, hp: 250 },
+            { kind: 'interact', text: 'Crack the vault (hold E for 3s)', x: 125, z: -805, radius: 8 },
+            { kind: 'deliver', text: 'Escape to Playa Dorado Marina', x: 780, z: 260, radius: 30 },
+        ],
+    },
+];
+// ---- shops ----
+export const SHOPS = [
+    { id: 'armory', name: 'Solmar Armory', x: -120, z: 80, radius: 16, kind: 'armory' },
+    { id: 'customs', name: 'Voss Customs', x: -460, z: -140, radius: 30, kind: 'customs' },
+    { id: 'motel', name: 'Safehouse Motel', x: 520, z: 140, radius: 20, kind: 'motel' },
+];
+// ---- radio ----
+export const RADIO = [
+    { name: 'Solmar Wave 104.5', desc: 'Synthwave', kind: 'synth' },
+    { name: 'Dorado Heat 98.2', desc: 'Latin-Funk', kind: 'funk' },
+    { name: 'Radio Off', desc: '', kind: 'off' },
+];
+// ---- palette (sun-soaked Solmar: warm dusk, teal sea, pastel art deco) ----
+export const PALETTE = {
+    skyTop: 0x2a3a6a,
+    skyMid: 0xe8825a,
+    skyLow: 0xffc98a,
+    sun: 0xffb347,
+    fog: 0xe89a6a,
+    sea: 0x1d6f7a,
+    sand: 0xd9b380,
+    asphalt: 0x33363c,
+    sidewalk: 0x8a8578,
+    grass: 0x4a7a3a,
+    hudTeal: '#2fd6c0',
+    hudAmber: '#ffb347',
+    hudRed: '#ff4d4d',
+    hudBlue: '#4da6ff',
+};
