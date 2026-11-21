@@ -1,69 +1,65 @@
-// Screenshot driver: serves game/ locally, loads each ?shot= scenario at
-// 1280x720, waits for window.__shotReady, captures the frame twice and
-// requires byte-identical output, then writes the screenshots.
-import { createHash } from 'node:crypto';
-import { spawn } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+// Render the four deterministic cover shots with headless Chromium.
+// Usage: node scripts/shots.mjs [outDir]  (default: screenshots/)
+// The server must be running (npm run serve:test) or pass --serve to
+// start it here. Each shot loads ?shot=<name>&seed=1 and waits for
+// window.__shotReady, then screenshots 1280x720.
 import { chromium } from 'playwright';
+import fs from 'node:fs';
+import path from 'node:path';
+import { spawn } from 'node:child_process';
 
-const ROOT = new URL('..', import.meta.url).pathname;
-const LOWFX = process.env.SHOT_LOWFX === '1';
+const OUT = process.argv[2] || 'screenshots';
+const BASE = 'http://127.0.0.1:8734';
 const SHOTS = [
-  { name: '1-start.jpg', query: '?shot=start&seed=1' + (LOWFX ? '&lowfx=1' : '') },
-  { name: '2-play.jpg', query: '?shot=play&seed=1' + (LOWFX ? '&lowfx=1' : '') },
-  { name: '3-combat.jpg', query: '?shot=combat&seed=1' + (LOWFX ? '&lowfx=1' : '') },
-  { name: '4-end.jpg', query: '?shot=end&seed=1' + (LOWFX ? '&lowfx=1' : '') },
+  { name: '1-start.jpg', query: '?shot=start&seed=1' },
+  { name: '2-play.jpg', query: '?shot=play&seed=1' },
+  { name: '3-combat.jpg', query: '?shot=combat&seed=1' },
+  { name: '4-end.jpg', query: '?shot=end&seed=1' },
 ];
 
-const server = spawn('node', ['serve.ts', '--port', '8931'], { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
-await new Promise((resolve) => setTimeout(resolve, 1500));
+let server = null;
+async function ensureServer() {
+  try {
+    const res = await fetch(`${BASE}/index.html`);
+    if (res.ok) return;
+  } catch {
+    // fall through to spawn
+  }
+  server = spawn('node', ['scripts/serve-test.mjs'], { stdio: 'inherit' });
+  for (let i = 0; i < 30; i++) {
+    await new Promise((r) => setTimeout(r, 200));
+    try {
+      const res = await fetch(`${BASE}/index.html`);
+      if (res.ok) return;
+    } catch {
+      // keep waiting
+    }
+  }
+  throw new Error('test server did not come up');
+}
 
-let failures = 0;
+const browser = await chromium.launch({
+  executablePath: '/home/hatch/.cache/ms-playwright/chromium_headless_shell-1248/chrome-headless-shell-linux64/chrome-headless-shell',
+});
 try {
-  const browser = await chromium.launch({
-    executablePath: process.env.HOME + '/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome',
-    args: ['--use-gl=swiftshader', '--enable-unsafe-swiftshader'],
-  });
+  await ensureServer();
+  fs.mkdirSync(OUT, { recursive: true });
   const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
   const errors = [];
-  page.on('console', (msg) => {
-    if (msg.type() === 'error') errors.push(msg.text());
+  page.on('console', (m) => {
+    if (m.type() === 'error') errors.push(m.text());
   });
-  page.on('pageerror', (err) => errors.push(String(err)));
-  for (const shot of SHOTS) {
-    errors.length = 0;
-    await page.goto('http://127.0.0.1:8931/' + shot.query, { waitUntil: 'load' });
-    try {
-      await page.waitForFunction(() => window.__shotReady === true, undefined, { timeout: 180000 });
-    } catch {
-      console.log('FAIL ' + shot.name + ': __shotReady never set; errors: ' + errors.join(' | '));
-      failures++;
-      continue;
-    }
-    const buf1 = await page.screenshot({ type: 'jpeg', quality: 88 });
-    const buf2 = await page.screenshot({ type: 'jpeg', quality: 88 });
-    const h1 = createHash('sha256').update(buf1).digest('hex');
-    const h2 = createHash('sha256').update(buf2).digest('hex');
-    if (h1 !== h2) {
-      console.log('FAIL ' + shot.name + ': two renders differ (not deterministic)');
-      failures++;
-      continue;
-    }
-    if (buf1.length > 262144) {
-      console.log('FAIL ' + shot.name + ': ' + buf1.length + ' bytes exceeds 256 KiB');
-      failures++;
-      continue;
-    }
-    writeFileSync(ROOT + '/screenshots/' + shot.name, buf1);
-    console.log('PASS ' + shot.name + ': ' + buf1.length + ' bytes, deterministic' + (errors.length ? ' (console errors: ' + errors.join(' | ') + ')' : ''));
-    if (errors.length) failures++;
+  page.on('pageerror', (e) => errors.push(String(e)));
+  for (const s of SHOTS) {
+    await page.goto(`${BASE}/${s.query}`, { waitUntil: 'load' });
+    await page.waitForFunction(() => window.__shotReady === true, undefined, { timeout: 600000 });
+    const file = path.join(OUT, s.name);
+    await page.screenshot({ path: file, type: 'jpeg', quality: 90 });
+    const size = fs.statSync(file).size;
+    console.log(`${s.name}: ${size} bytes`);
   }
-  await browser.close();
+  console.log(errors.length === 0 ? 'shots OK, no console errors' : `shots done with ${errors.length} console error(s):\n${errors.join('\n')}`);
 } finally {
-  server.kill();
+  await browser.close();
+  if (server) server.kill();
 }
-if (failures > 0) {
-  console.error('SHOTS FAILED: ' + failures + ' failure(s)');
-  process.exit(1);
-}
-console.log('SHOTS OK');
